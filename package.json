@@ -1,0 +1,12 @@
+﻿{
+  "name": "lumesync-core",
+  "private": true,
+  "version": "1.0.0",
+  "description": "LumeSync core runtime (connection control + rendering)",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "start": "node packages/server/index.js"
+  }
+}
