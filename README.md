@@ -1,10 +1,17 @@
 ﻿# LumeSync Core
 
-This repository contains only runtime control and rendering runtime:
+Core runtime for classroom connection control and rendering.
 
-- packages/server
-- packages/runtime-control
-- packages/render-engine
-- packages/engine
+## Quick Start
 
-No course/file management APIs are included in core.
+`ash
+npm start
+`",
+        ",
+        
+
+- Branch: main
+- License: MIT
+- Security policy: SECURITY.md
+- Contribution guide: CONTRIBUTING.md
+- Community rules: CODE_OF_CONDUCT.md
