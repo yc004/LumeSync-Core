@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "lumesync-core",
   "private": true,
   "version": "1.0.0",
@@ -8,5 +8,6 @@
   ],
   "scripts": {
     "start": "node packages/server/index.js"
-  }
+  },
+  "packageManager": "pnpm@10.33.0"
 }

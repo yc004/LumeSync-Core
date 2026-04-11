@@ -26,6 +26,93 @@ const getPdfDoc = (pdfUrl) => {
     return p;
 };
 
+const IDENTITY_CLIENT_ID_KEY = 'lumesync_viewer_client_id';
+
+const normalizeRole = (role) => {
+    const r = String(role || '').trim().toLowerCase();
+    if (r === 'host' || r === 'teacher') return 'host';
+    if (r === 'viewer' || r === 'student') return 'viewer';
+    return '';
+};
+
+const pickIdentityFromInjected = () => {
+    const src = window.__LumeSyncIdentity || null;
+    if (!src || typeof src !== 'object') return null;
+    return {
+        role: normalizeRole(src.role),
+        token: src.token ? String(src.token) : '',
+        clientId: src.clientId ? String(src.clientId) : ''
+    };
+};
+
+const pickIdentityFromQuery = () => {
+    try {
+        const params = new URLSearchParams(window.location.search || '');
+        const role = normalizeRole(params.get('role'));
+        const token = params.get('token') || '';
+        const clientId = params.get('clientId') || '';
+        return { role, token, clientId };
+    } catch (_) {
+        return { role: '', token: '', clientId: '' };
+    }
+};
+
+const cleanupSensitiveIdentityQuery = () => {
+    try {
+        const url = new URL(window.location.href);
+        if (!url.searchParams.has('token')) return;
+        url.searchParams.delete('token');
+        window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+    } catch (_) {}
+};
+
+const getOrCreateViewerClientId = () => {
+    try {
+        const existing = localStorage.getItem(IDENTITY_CLIENT_ID_KEY);
+        if (existing) return existing;
+        const next = `viewer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+        localStorage.setItem(IDENTITY_CLIENT_ID_KEY, next);
+        return next;
+    } catch (_) {
+        return `viewer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+};
+
+const prepareSocketAuth = () => {
+    const injected = pickIdentityFromInjected() || {};
+    const query = pickIdentityFromQuery() || {};
+
+    const rawRole = injected.role || query.role || '';
+    const rawToken = injected.token || query.token || '';
+    const rawClientId = injected.clientId || query.clientId || '';
+    const hasDeclaredIdentity = Boolean(rawRole || rawToken || rawClientId);
+
+    if (!hasDeclaredIdentity) return null;
+
+    const role = rawRole || 'viewer';
+    if (role === 'host') {
+        if (!rawToken) {
+            throw new Error('Host token is required when declared role=host');
+        }
+        return {
+            role: 'host',
+            token: rawToken,
+            clientId: rawClientId || `host-${window.location.hostname || 'local'}`
+        };
+    }
+
+    if (!rawToken) {
+        // 没有 token 时保持 legacy 连接流程，兼容现有教师端。
+        return null;
+    }
+
+    return {
+        role: 'viewer',
+        token: rawToken,
+        clientId: rawClientId || getOrCreateViewerClientId()
+    };
+};
+
 function PdfPageSlide({ pdfUrl, pageNumber }) {
     const canvasRef = useRef(null);
     const [status, setStatus] = useState('loading');
@@ -103,6 +190,7 @@ function PdfPageSlide({ pdfUrl, pageNumber }) {
 function ClassroomApp() {
     const [isHost, setIsHost] = useState(false);
     const [roleAssigned, setRoleAssigned] = useState(false);
+    const [identityError, setIdentityError] = useState('');
     const [courseCatalog, setCourseCatalog] = useState([]);
     const [currentCourseId, setCurrentCourseId] = useState(null);
     const [currentCourseData, setCurrentCourseData] = useState(null);
@@ -169,11 +257,27 @@ function ClassroomApp() {
     };
 
     useEffect(() => {
-        socketRef.current = window.io();
+        let auth = null;
+        try {
+            auth = prepareSocketAuth();
+        } catch (err) {
+            console.error('[identity] init failed:', err);
+            setIdentityError(err?.message || String(err));
+            return () => {};
+        }
+        socketRef.current = auth ? window.io({ auth }) : window.io();
+        if (auth) cleanupSensitiveIdentityQuery();
         // 将 socket 引用暴露到全局，供 CourseGlobalContext.syncInteraction 使用
         window.socketRef = socketRef;
 
+        socketRef.current.on('identity-rejected', (data) => {
+            const msg = data?.message || data?.code || 'Identity verification failed';
+            setIdentityError(msg);
+            setRoleAssigned(false);
+        });
+
         socketRef.current.on('role-assigned', (data) => {
+            setIdentityError('');
             setIsHost(data.role === 'host');
             // 处理 courseCatalog 可能是对象 {courses: [...], folders: [...]} 或数组的情况
             let catalog = data.courseCatalog || [];
@@ -576,6 +680,16 @@ function ClassroomApp() {
     const handleEndCourse = () => {
         if (socketRef.current && isHost) socketRef.current.emit('end-course');
     };
+
+    if (identityError) {
+        return (
+            <div className="flex flex-col items-center justify-center h-screen bg-slate-900 text-white select-none px-8">
+                <i className="fas fa-circle-exclamation text-5xl text-red-400 mb-6"></i>
+                <h2 className="text-2xl tracking-widest font-bold">身份验证失败</h2>
+                <p className="text-slate-300 mt-3 text-center break-all">{identityError}</p>
+            </div>
+        );
+    }
 
     if (!roleAssigned) {
         return (

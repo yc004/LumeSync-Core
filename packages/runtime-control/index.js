@@ -6,6 +6,11 @@ const STUDENT_LOG_MAX = Number(process.env.LUMESYNC_STUDENT_LOG_MAX || 500);
 const ANNOTATION_MAX_SEGMENTS_PER_SLIDE = Number(
     process.env.LUMESYNC_ANNOTATION_MAX_SEGMENTS_PER_SLIDE || 5000
 );
+const HOST_TOKEN = String(process.env.LUMESYNC_HOST_TOKEN || '');
+const VIEWER_TOKEN_SECRET = String(process.env.LUMESYNC_VIEWER_TOKEN_SECRET || '');
+const IDENTITY_LEGACY_COMPAT = String(process.env.LUMESYNC_IDENTITY_LEGACY_COMPAT || 'true').toLowerCase() !== 'false';
+const { normalizeIp, verifyViewerSessionToken } = require('./identity');
+let studentConnections = new Map(); // clientKey -> { count, clientId, clientIp }
 
 let studentIPs = new Map(); // IP -> socket数量，同一IP只计一个学生
 
@@ -103,6 +108,91 @@ function pushLog(type, ip, extra) {
     }
 }
 
+function getStringValue(value) {
+    if (value === undefined || value === null) return '';
+    if (Array.isArray(value)) return getStringValue(value[0]);
+    return String(value).trim();
+}
+
+function normalizeDeclaredRole(rawRole) {
+    const role = getStringValue(rawRole).toLowerCase();
+    if (role === 'host' || role === 'teacher') return 'host';
+    if (role === 'viewer' || role === 'student') return 'viewer';
+    return '';
+}
+
+function rejectIdentity(socket, code, message) {
+    socket.emit('identity-rejected', { code, message });
+    socket.disconnect(true);
+}
+
+function resolveConnectionIdentity(socket) {
+    const auth = socket?.handshake?.auth || {};
+    const query = socket?.handshake?.query || {};
+
+    const clientIp = normalizeIp(socket?.handshake?.address || '');
+    const declaredRole = normalizeDeclaredRole(auth.role || query.role);
+    const token = getStringValue(auth.token || query.token);
+    const clientId = getStringValue(auth.clientId || query.clientId);
+
+    if (!declaredRole) {
+        if (!IDENTITY_LEGACY_COMPAT) {
+            return { ok: false, code: 'identity_missing', message: 'Missing role declaration' };
+        }
+        const isLocalhost = clientIp === '127.0.0.1' || clientIp === '::1';
+        const legacyRole = isLocalhost ? 'host' : 'viewer';
+        return {
+            ok: true,
+            role: legacyRole,
+            token: '',
+            clientId: clientId || clientIp,
+            clientIp,
+            clientKey: clientId || clientIp,
+            isLegacy: true
+        };
+    }
+
+    const normalizedClientId = clientId || (declaredRole === 'host' ? `host-${clientIp || 'unknown'}` : '');
+    if (!normalizedClientId) {
+        return { ok: false, code: 'client_id_missing', message: 'Missing clientId' };
+    }
+
+    const identity = {
+        ok: true,
+        role: declaredRole,
+        token,
+        clientId: normalizedClientId,
+        clientIp,
+        clientKey: normalizedClientId || clientIp,
+        isLegacy: false
+    };
+
+    if (declaredRole === 'host') {
+        if (!HOST_TOKEN) {
+            return { ok: false, code: 'host_token_not_configured', message: 'Host token not configured on server' };
+        }
+        if (!token || token !== HOST_TOKEN) {
+            return { ok: false, code: 'host_auth_failed', message: 'Invalid host token' };
+        }
+        return identity;
+    }
+
+    if (!VIEWER_TOKEN_SECRET) {
+        return { ok: false, code: 'viewer_token_not_configured', message: 'Viewer token secret not configured on server' };
+    }
+    if (!token) {
+        return { ok: false, code: 'viewer_token_missing', message: 'Missing viewer token' };
+    }
+    const verifyResult = verifyViewerSessionToken(token, VIEWER_TOKEN_SECRET);
+    if (!verifyResult.ok) {
+        return { ok: false, code: verifyResult.code, message: 'Viewer token verification failed' };
+    }
+    if (String(verifyResult.payload.sub) !== normalizedClientId) {
+        return { ok: false, code: 'viewer_client_mismatch', message: 'Token subject and clientId mismatch' };
+    }
+    return identity;
+}
+
 function setupSocketHandlers(io, {
     setCurrentCourseId,
     setCurrentSlideIndex,
@@ -114,17 +204,21 @@ function setupSocketHandlers(io, {
 }) {
     io.on('connection', (socket) => {
         // 统一转换为 IPv4，去掉 IPv6 映射前缀 ::ffff:
-        const rawIp = socket.handshake.address;
-        const clientIp = rawIp.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
-        const isLocalhost = clientIp === '127.0.0.1' || clientIp === '::1';
-
-        const role = isLocalhost ? 'host' : 'viewer';
-        console.log(`[conn] IP=${clientIp} role=${role}`);
+        const identity = resolveConnectionIdentity(socket);
+        if (!identity.ok) {
+            rejectIdentity(socket, identity.code, identity.message);
+            return;
+        }
+        const { role, clientIp, clientId, clientKey, isLegacy } = identity;
+        console.log(`[conn] IP=${clientIp} role=${role} clientId=${clientId} legacy=${isLegacy}`);
 
         // 发送角色信息和当前课程状态给当前客户端
         socket.emit('role-assigned', {
             role: role,
             clientIp: clientIp,
+            clientId,
+            clientKey,
+            legacyMode: !!isLegacy,
             currentCourseId: getCurrentCourseId(),
             currentSlideIndex: getCurrentSlideIndex(),
             hostSettings: currentHostSettings,
@@ -135,23 +229,35 @@ function setupSocketHandlers(io, {
         if (role === 'host') {
             socket.join('hosts');
             // 教师端连接时发送初始学生数量
-            socket.emit('student-status', { count: studentIPs.size, action: 'init' });
+            socket.emit('student-status', { count: studentConnections.size, action: 'init' });
         } else {
             socket.join('viewers');
             // 统计在线学生
-            const prev = studentIPs.get(clientIp) || 0;
-            studentIPs.set(clientIp, prev + 1);
+            const prevConn = studentConnections.get(clientKey)?.count || 0;
+            studentConnections.set(clientKey, {
+                count: prevConn + 1,
+                clientId,
+                clientIp
+            });
+            const prevIp = studentIPs.get(clientIp) || 0;
+            studentIPs.set(clientIp, prevIp + 1);
             // 只有该 IP 的第一个连接才触发 join 通知
-            if (prev === 0) {
-                pushLog('join', clientIp);
-                io.to('hosts').emit('student-status', { count: studentIPs.size, action: 'join', ip: clientIp });
+            if (prevConn === 0) {
+                pushLog('join', clientIp, { clientId, clientKey });
+                io.to('hosts').emit('student-status', {
+                    count: studentConnections.size,
+                    action: 'join',
+                    ip: clientIp,
+                    clientId,
+                    clientKey
+                });
             }
         }
 
         // 获取学生数量（教师端主动查询）
         socket.on('get-student-count', () => {
             if (role !== 'host') return;
-            socket.emit('student-status', { count: studentIPs.size, action: 'init' });
+            socket.emit('student-status', { count: studentConnections.size, action: 'init' });
         });
 
         // ========================================================
@@ -234,8 +340,8 @@ function setupSocketHandlers(io, {
         socket.on('student-alert', (data) => {
             if (role !== 'viewer') return;
             const { type } = data;
-            pushLog(type, clientIp, {});
-            io.to('hosts').emit('student-alert', { ip: clientIp, type });
+            pushLog(type, clientIp, { clientId, clientKey });
+            io.to('hosts').emit('student-alert', { ip: clientIp, type, clientId, clientKey });
         });
 
         // 教师端推送管理员密码
@@ -269,7 +375,7 @@ function setupSocketHandlers(io, {
             if (role !== 'viewer') return;
 
             const submissionId = data && data.submissionId ? String(data.submissionId) : '';
-            const courseId = data && data.courseId ? String(data.courseId) : currentCourseId || '';
+            const courseId = data && data.courseId ? String(data.courseId) : getCurrentCourseId() || '';
             const content = data && data.content !== undefined ? data.content : null;
             const fileName = data && data.fileName ? String(data.fileName) : '';
             const mergeFile = data && typeof data.mergeFile === 'boolean' ? data.mergeFile : false;
@@ -288,6 +394,7 @@ function setupSocketHandlers(io, {
                 submissionId,
                 courseId,
                 clientIp,
+                clientId,
                 content,
                 fileName,
                 mergeFile,
@@ -423,12 +530,12 @@ function setupSocketHandlers(io, {
                 return;
             }
 
-            if (session.responses.has(clientIp)) {
+            if (session.responses.has(clientKey)) {
                 socket.emit('vote:submit:ack', { success: false, voteId, error: '你已提交过投票' });
                 return;
             }
 
-            session.responses.set(clientIp, optionId);
+            session.responses.set(clientKey, optionId);
             const result = buildVoteResult(session);
 
             socket.emit('vote:submit:ack', { success: true, voteId });
@@ -549,7 +656,7 @@ function setupSocketHandlers(io, {
         socket.on('student-action', (data) => {
             if (role !== 'viewer') return;
             const { type, slide } = data;
-            pushLog(type, clientIp, { slide });
+            pushLog(type, clientIp, { slide, clientId, clientKey });
         });
 
         // ========================================================
@@ -557,16 +664,33 @@ function setupSocketHandlers(io, {
         // ========================================================
 
         socket.on('disconnect', () => {
-            console.log(`[disconnect] IP=${clientIp} role=${role}`);
+            console.log(`[disconnect] IP=${clientIp} role=${role} clientId=${clientId}`);
 
             if (role === 'viewer') {
-                const count = studentIPs.get(clientIp) || 0;
-                if (count <= 1) {
-                    studentIPs.delete(clientIp);
-                    pushLog('leave', clientIp);
-                    io.to('hosts').emit('student-status', { count: studentIPs.size, action: 'leave', ip: clientIp });
+                const connCount = studentConnections.get(clientKey)?.count || 0;
+                if (connCount <= 1) {
+                    studentConnections.delete(clientKey);
+                    pushLog('leave', clientIp, { clientId, clientKey });
+                    io.to('hosts').emit('student-status', {
+                        count: studentConnections.size,
+                        action: 'leave',
+                        ip: clientIp,
+                        clientId,
+                        clientKey
+                    });
                 } else {
-                    studentIPs.set(clientIp, count - 1);
+                    studentConnections.set(clientKey, {
+                        count: connCount - 1,
+                        clientId,
+                        clientIp
+                    });
+                }
+
+                const ipCount = studentIPs.get(clientIp) || 0;
+                if (ipCount <= 1) {
+                    studentIPs.delete(clientIp);
+                } else {
+                    studentIPs.set(clientIp, ipCount - 1);
                 }
             }
         });
@@ -577,7 +701,7 @@ function setupSocketHandlers(io, {
 
 // 导出学生IP统计和日志，供API使用
 function getStudentCount() {
-    return studentIPs.size;
+    return studentConnections.size;
 }
 
 function getStudentLog() {

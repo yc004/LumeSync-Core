@@ -5,6 +5,10 @@ const path = require('path');
 
 const runtimeControl = require('../runtime-control');
 const { resolveEngineSrcDir } = require('../render-engine');
+const {
+    createViewerSessionToken,
+    normalizeIp
+} = require('../runtime-control/identity');
 
 const app = express();
 const server = http.createServer(app);
@@ -15,6 +19,8 @@ const io = new Server(server, {
 
 let currentCourseId = null;
 let currentSlideIndex = 0;
+const VIEWER_TOKEN_TTL_SEC = Number(process.env.LUMESYNC_VIEWER_TOKEN_TTL_SEC || 14400);
+const VIEWER_TOKEN_SECRET = String(process.env.LUMESYNC_VIEWER_TOKEN_SECRET || '');
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -59,6 +65,39 @@ app.get('/api/students', (_req, res) => {
 
 app.get('/api/student-log', (_req, res) => {
     res.json({ log: runtimeControl.getStudentLog() });
+});
+
+app.post('/api/session/bootstrap', (req, res) => {
+    const role = String(req.body?.role || 'viewer').trim().toLowerCase();
+    const providedClientId = String(req.body?.clientId || '').trim();
+    const clientId = providedClientId || `anon-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const clientIp = normalizeIp(req.ip || req.socket?.remoteAddress || '');
+
+    if (role !== 'viewer') {
+        res.status(400).json({ success: false, error: 'Only viewer bootstrap is supported' });
+        return;
+    }
+    if (!VIEWER_TOKEN_SECRET) {
+        res.status(500).json({ success: false, error: 'Viewer token secret is not configured on server' });
+        return;
+    }
+
+    const token = createViewerSessionToken({
+        clientId,
+        ttlSec: VIEWER_TOKEN_TTL_SEC,
+        secret: VIEWER_TOKEN_SECRET
+    });
+    const expiresAt = new Date(Date.now() + VIEWER_TOKEN_TTL_SEC * 1000).toISOString();
+
+    res.json({
+        success: true,
+        role: 'viewer',
+        clientId,
+        token,
+        expiresAt,
+        clientIp,
+        serverTime: new Date().toISOString()
+    });
 });
 
 app.get('*', (_req, res) => {

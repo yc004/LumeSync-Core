@@ -1,81 +1,65 @@
-# LumeSync Core
+﻿# LumeSync Core
 
-LumeSync 的核心运行时仓库，负责课堂连接控制、状态同步和渲染能力提供。
+LumeSync 鐨勬牳蹇冭繍琛屾椂浠撳簱锛岃礋璐ｈ鍫傝繛鎺ユ帶鍒躲€佺姸鎬佸悓姝ュ拰娓叉煋鑳藉姏鎻愪緵銆?
+## 鑱岃矗杈圭晫
 
-## 职责边界
-
-- 提供课堂实时同步（Socket.io 事件总线）。
-- 提供渲染引擎脚本静态服务（`/engine`）。
-- 提供在线学生列表与学生操作日志查询。
-- 不负责课程文件管理和业务数据持久化（课程文件由 teacher 端管理）。
-
-## 目录结构
+- 鎻愪緵璇惧爞瀹炴椂鍚屾锛圫ocket.io 浜嬩欢鎬荤嚎锛夈€?- 鎻愪緵娓叉煋寮曟搸鑴氭湰闈欐€佹湇鍔★紙`/engine`锛夈€?- 鎻愪緵鍦ㄧ嚎瀛︾敓鍒楄〃涓庡鐢熸搷浣滄棩蹇楁煡璇€?- 涓嶈礋璐ｈ绋嬫枃浠剁鐞嗗拰涓氬姟鏁版嵁鎸佷箙鍖栵紙璇剧▼鏂囦欢鐢?teacher 绔鐞嗭級銆?
+## 鐩綍缁撴瀯
 
 ```text
 packages/
-  engine/           # 浏览器端渲染引擎脚本
-  render-engine/    # 渲染引擎路径解析与导出封装
-  runtime-control/  # Socket 会话、课堂状态与事件处理
-  server/           # 核心运行时 HTTP/Socket 服务入口
+  engine/           # 娴忚鍣ㄧ娓叉煋寮曟搸鑴氭湰
+  render-engine/    # 娓叉煋寮曟搸璺緞瑙ｆ瀽涓庡鍑哄皝瑁?  runtime-control/  # Socket 浼氳瘽銆佽鍫傜姸鎬佷笌浜嬩欢澶勭悊
+  server/           # 鏍稿績杩愯鏃?HTTP/Socket 鏈嶅姟鍏ュ彛
 ```
 
-## 快速开始
-
+## 蹇€熷紑濮?
 ```bash
-npm install
-npm start
+pnpm install
+pnpm start
 ```
 
-默认监听端口 `3000`，可通过环境变量覆盖：
-
+榛樿鐩戝惉绔彛 `3000`锛屽彲閫氳繃鐜鍙橀噺瑕嗙洊锛?
 ```bash
-PORT=3100 npm start
+PORT=3100 pnpm start
 ```
 
-## 运行接口
+## 杩愯鎺ュ彛
 
-核心服务默认入口：`packages/server/index.js`
+鏍稿績鏈嶅姟榛樿鍏ュ彛锛歚packages/server/index.js`
 
 ### HTTP
 
-- `GET /api/health`：健康检查
-- `GET /api/students`：在线学生 IP 列表
-- `GET /api/student-log`：学生行为日志
-- `GET /api/courses`：兼容接口（返回空课程列表）
-- `GET /api/course-status`：当前课程与页码状态
-- `POST /api/refresh-courses`：兼容接口（不加载课程）
-- `GET /api/components-manifest`：兼容接口（返回空组件列表）
+- `GET /api/health`锛氬仴搴锋鏌?- `GET /api/students`锛氬湪绾垮鐢?IP 鍒楄〃
+- `GET /api/student-log`锛氬鐢熻涓烘棩蹇?- `GET /api/courses`锛氬吋瀹规帴鍙ｏ紙杩斿洖绌鸿绋嬪垪琛級
+- `GET /api/course-status`锛氬綋鍓嶈绋嬩笌椤电爜鐘舵€?- `POST /api/refresh-courses`锛氬吋瀹规帴鍙ｏ紙涓嶅姞杞借绋嬶級
+- `GET /api/components-manifest`锛氬吋瀹规帴鍙ｏ紙杩斿洖绌虹粍浠跺垪琛級
 
-### Socket（核心事件）
+### Socket锛堟牳蹇冧簨浠讹級
 
-- 教师端：`select-course`、`sync-slide`、`host-settings`、`end-course`
-- 学生端：`student:submit`、`student-alert`、`request-sync-state`
-- 课堂互动：`interaction:sync`、`sync-var`
-- 投票：`vote:start`、`vote:submit`、`vote:end`
-- 标注：`annotation:segment`、`annotation:stroke`、`annotation:clear`
+- 鏁欏笀绔細`select-course`銆乣sync-slide`銆乣host-settings`銆乣end-course`
+- 瀛︾敓绔細`student:submit`銆乣student-alert`銆乣request-sync-state`
+- 璇惧爞浜掑姩锛歚interaction:sync`銆乣sync-var`
+- 鎶曠エ锛歚vote:start`銆乣vote:submit`銆乣vote:end`
+- 鏍囨敞锛歚annotation:segment`銆乣annotation:stroke`銆乣annotation:clear`
 
-## 关键环境变量
+## 鍏抽敭鐜鍙橀噺
 
-| 变量 | 默认值 | 说明 |
+| 鍙橀噺 | 榛樿鍊?| 璇存槑 |
 | --- | --- | --- |
-| `PORT` | `3000` | 核心服务端口 |
-| `LUMESYNC_STUDENT_LOG_MAX` | `500` | 学生日志最大缓存条数 |
-| `LUMESYNC_ANNOTATION_MAX_SEGMENTS_PER_SLIDE` | `5000` | 单页标注最大缓存段数 |
+| `PORT` | `3000` | 鏍稿績鏈嶅姟绔彛 |
+| `LUMESYNC_STUDENT_LOG_MAX` | `500` | 瀛︾敓鏃ュ織鏈€澶х紦瀛樻潯鏁?|
+| `LUMESYNC_ANNOTATION_MAX_SEGMENTS_PER_SLIDE` | `5000` | 鍗曢〉鏍囨敞鏈€澶х紦瀛樻鏁?|
 
-## 开发说明
+## 寮€鍙戣鏄?
+- 褰撳墠浠撳簱鑴氭湰鏋佺畝锛歚pnpm start` 鍚姩杩愯鏃舵湇鍔°€?- 璇剧▼涓庤祫婧愮鐞嗚兘鍔涗笉鍦ㄦ湰浠撳簱瀹炵幇锛涜仈璋冭鎼厤 `teacher` 绔€?
+## 甯歌闂
 
-- 当前仓库脚本极简：`npm start` 启动运行时服务。
-- 课程与资源管理能力不在本仓库实现；联调请搭配 `teacher` 端。
-
-## 常见问题
-
-1. 访问 `/api/courses` 为空
-这是预期行为。Core 只保留兼容接口，不托管课程文件。
-
-2. 端口冲突导致启动失败
-修改 `PORT` 后重启，或先释放占用端口的进程。
-
-## 相关文档
+1. 璁块棶 `/api/courses` 涓虹┖
+杩欐槸棰勬湡琛屼负銆侰ore 鍙繚鐣欏吋瀹规帴鍙ｏ紝涓嶆墭绠¤绋嬫枃浠躲€?
+2. 绔彛鍐茬獊瀵艰嚧鍚姩澶辫触
+淇敼 `PORT` 鍚庨噸鍚紝鎴栧厛閲婃斁鍗犵敤绔彛鐨勮繘绋嬨€?
+## 鐩稿叧鏂囨。
 
 - [packages/server/README.md](./packages/server/README.md)
 - [packages/engine/README.md](./packages/engine/README.md)
@@ -83,3 +67,4 @@ PORT=3100 npm start
 - [SECURITY.md](./SECURITY.md)
 - [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
 - [LICENSE](./LICENSE)
+
