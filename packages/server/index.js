@@ -17,8 +17,6 @@ const io = new Server(server, {
     pingTimeout: 8000
 });
 
-let currentCourseId = null;
-let currentSlideIndex = 0;
 const VIEWER_TOKEN_TTL_SEC = Number(process.env.LUMESYNC_VIEWER_TOKEN_TTL_SEC || 14400);
 const VIEWER_TOKEN_SECRET = String(process.env.LUMESYNC_VIEWER_TOKEN_SECRET || '');
 
@@ -32,19 +30,17 @@ app.get('/api/health', (_req, res) => {
     res.json({ ok: true, app: 'LumeSync-Core', port: Number(process.env.PORT || 3000) });
 });
 
-// Compatibility shim: core runtime no longer owns course/files data.
+// Compatibility shim: core runtime no longer owns course/files data or classroom UI state.
 app.get('/api/courses', (_req, res) => {
     res.json({
         courses: [],
         folders: [],
-        currentCourseId,
-        currentSlideIndex,
         mode: 'core-runtime'
     });
 });
 
 app.get('/api/course-status', (_req, res) => {
-    res.json({ currentCourseId, currentSlideIndex, mode: 'core-runtime' });
+    res.json({ mode: 'core-runtime' });
 });
 
 app.post('/api/refresh-courses', (_req, res) => {
@@ -55,16 +51,16 @@ app.get('/api/components-manifest', (_req, res) => {
     res.json({ success: true, files: [], mode: 'core-runtime' });
 });
 
+app.get('/api/runtime-status', (_req, res) => {
+    res.json(runtimeControl.buildCoreRuntimeSnapshot(io));
+});
+
 app.get('/api/students', (_req, res) => {
-    const studentIPs = runtimeControl.getStudentIPs();
-    const students = Array.from(studentIPs.keys() || []).map((ip) =>
-        ip.startsWith('::ffff:') ? ip.slice(7) : ip
-    );
-    res.json({ students });
+    res.json({ students: runtimeControl.listCompatibilityStudents(io), mode: 'core-runtime' });
 });
 
 app.get('/api/student-log', (_req, res) => {
-    res.json({ log: runtimeControl.getStudentLog() });
+    res.json({ log: runtimeControl.listCompatibilityLog(io), mode: 'core-runtime' });
 });
 
 app.post('/api/session/bootstrap', (req, res) => {
@@ -104,17 +100,7 @@ app.get('*', (_req, res) => {
     res.status(404).send('LumeSync Core runtime is running. This service does not host course files.');
 });
 
-runtimeControl.setupSocketHandlers(io, {
-    setCurrentCourseId: (id) => {
-        currentCourseId = id;
-    },
-    setCurrentSlideIndex: (index) => {
-        currentSlideIndex = index;
-    },
-    getCurrentCourseId: () => currentCourseId,
-    getCurrentSlideIndex: () => currentSlideIndex,
-    getCourseCatalog: () => ({ courses: [], folders: [] })
-});
+runtimeControl.setupSocketHandlers(io);
 
 function startServer(port) {
     const PORT = Number(port || process.env.PORT || 3000);

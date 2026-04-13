@@ -63,3 +63,4 @@ function WebPageSlide({
 
 window.CourseComponents = window.CourseComponents || {};
 window.CourseComponents.WebPageSlide = WebPageSlide;
+window.WebPageSlide = WebPageSlide;

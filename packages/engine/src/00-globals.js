@@ -1,7 +1,7 @@
 // ========================================================
 // 全局 React Hook 解构 — 所有模块共享
 // ========================================================
-const { useState, useEffect, useRef } = React;
+const { useState, useEffect, useRef, useMemo, useCallback, useContext, useReducer } = React;
 const { createPortal } = ReactDOM;
 
 // 创建 portal 容器

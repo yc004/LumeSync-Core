@@ -1,112 +1,24 @@
-// ========================================================
-// Socket.io 实时通信
-// ========================================================
-
-const STUDENT_LOG_MAX = Number(process.env.LUMESYNC_STUDENT_LOG_MAX || 500);
-const ANNOTATION_MAX_SEGMENTS_PER_SLIDE = Number(
-    process.env.LUMESYNC_ANNOTATION_MAX_SEGMENTS_PER_SLIDE || 5000
-);
 const HOST_TOKEN = String(process.env.LUMESYNC_HOST_TOKEN || '');
 const VIEWER_TOKEN_SECRET = String(process.env.LUMESYNC_VIEWER_TOKEN_SECRET || '');
 const IDENTITY_LEGACY_COMPAT = String(process.env.LUMESYNC_IDENTITY_LEGACY_COMPAT || 'true').toLowerCase() !== 'false';
+const STUDENT_LOG_MAX = Number(process.env.LUMESYNC_STUDENT_LOG_MAX || 500);
 const { normalizeIp, verifyViewerSessionToken } = require('./identity');
-let studentConnections = new Map(); // clientKey -> { count, clientId, clientIp }
 
-let studentIPs = new Map(); // IP -> socket数量，同一IP只计一个学生
+const RESERVED_CLIENT_EVENTS = new Set([
+    'connect',
+    'connect_error',
+    'disconnect',
+    'disconnecting',
+    'newListener',
+    'removeListener'
+]);
 
-// 教师端当前设置（服务端缓存，用于新连接学生同步）
-let currentHostSettings = {
-    forceFullscreen: false,
-    syncFollow: true,
-    syncInteraction: false,  // 默认关闭教师交互同步
-    allowInteract: true,
-    podiumAtTop: true,
-    renderScale: 0.96,
-    uiScale: 1.0,
-    alertJoin: true,
-    alertLeave: true,
-    alertFullscreenExit: true,
-    alertTabHidden: true,
-};
-
-// 标注数据（内存缓存）
-const annotationStore = new Map();
-const getAnnoKey = (courseId, slideIndex) => `${String(courseId || '')}:${Number(slideIndex || 0)}`;
-
-// 学生操作日志（内存，最多保留 500 条）
-const studentLog = [];
-
-// 投票会话（内存）
-const voteSessions = new Map();
-const voteSessionTimers = new Map();
-const getVoteKey = (courseId, slideIndex, voteId) => `${String(courseId || '')}:${Number(slideIndex || 0)}:${String(voteId || '')}`;
-
-function buildVoteResult(session) {
-    const counts = {};
-    (session.options || []).forEach(opt => { counts[opt.id] = 0; });
-    session.responses.forEach(optionId => {
-        if (Object.prototype.hasOwnProperty.call(counts, optionId)) counts[optionId] += 1;
-    });
-    const totalVotes = session.responses.size;
-    const options = (session.options || []).map(opt => ({
-        id: opt.id,
-        label: opt.label,
-        votes: counts[opt.id] || 0,
-        percent: totalVotes > 0 ? Math.round(((counts[opt.id] || 0) / totalVotes) * 100) : 0
-    }));
-    return {
-        voteId: session.voteId,
-        courseId: session.courseId,
-        slideIndex: session.slideIndex,
-        question: session.question,
-        anonymous: !!session.anonymous,
-        status: session.status,
-        startedAt: session.startedAt,
-        endsAt: session.endsAt,
-        totalVotes,
-        options
-    };
-}
-
-function clearVoteSession(courseId, slideIndex, voteId) {
-    const key = getVoteKey(courseId, slideIndex, voteId);
-    if (voteSessionTimers.has(key)) {
-        clearTimeout(voteSessionTimers.get(key));
-        voteSessionTimers.delete(key);
-    }
-    voteSessions.delete(key);
-}
-
-function clearVotesByCourse(courseId) {
-    const prefix = `${String(courseId || '')}:`;
-    Array.from(voteSessions.keys()).forEach(key => {
-        if (key.startsWith(prefix)) {
-            if (voteSessionTimers.has(key)) {
-                clearTimeout(voteSessionTimers.get(key));
-                voteSessionTimers.delete(key);
-            }
-            voteSessions.delete(key);
-        }
-    });
-}
-
-function findVoteSessionByCourseAndVoteId(courseId, voteId) {
-    for (const [key, session] of voteSessions.entries()) {
-        if (session.courseId === String(courseId || '') && session.voteId === String(voteId || '')) {
-            return { key, session };
-        }
-    }
-    return null;
-}
-
-
-function pushLog(type, ip, extra) {
-    const entry = { time: new Date().toISOString(), type, ip, ...extra };
-    studentLog.push(entry);
-    if (studentLog.length > STUDENT_LOG_MAX) {
-        studentLog.shift();
-    }
-}
+const SERVER_ONLY_EVENTS = new Set([
+    'role-assigned',
+    'identity-rejected',
+    'participant-joined',
+    'participant-left'
+]);
 
 function getStringValue(value) {
     if (value === undefined || value === null) return '';
@@ -183,6 +95,7 @@ function resolveConnectionIdentity(socket) {
     if (!token) {
         return { ok: false, code: 'viewer_token_missing', message: 'Missing viewer token' };
     }
+
     const verifyResult = verifyViewerSessionToken(token, VIEWER_TOKEN_SECRET);
     if (!verifyResult.ok) {
         return { ok: false, code: verifyResult.code, message: 'Viewer token verification failed' };
@@ -190,532 +103,180 @@ function resolveConnectionIdentity(socket) {
     if (String(verifyResult.payload.sub) !== normalizedClientId) {
         return { ok: false, code: 'viewer_client_mismatch', message: 'Token subject and clientId mismatch' };
     }
+
     return identity;
 }
 
-function setupSocketHandlers(io, {
-    setCurrentCourseId,
-    setCurrentSlideIndex,
-    getCurrentCourseId,
-    getCurrentSlideIndex,
-    getCourseCatalog,
-    refreshCourseCatalog,
-    registerDependencies
-}) {
+function buildParticipantPayload(identity, socket) {
+    return {
+        role: identity.role,
+        clientIp: identity.clientIp,
+        clientId: identity.clientId,
+        clientKey: identity.clientKey,
+        legacyMode: !!identity.isLegacy,
+        socketId: socket.id
+    };
+}
+
+function stripTargetId(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.prototype.hasOwnProperty.call(value, 'targetId')) {
+        return value;
+    }
+    const { targetId, ...rest } = value;
+    return rest;
+}
+
+function isForwardableEvent(eventName) {
+    return !RESERVED_CLIENT_EVENTS.has(eventName) && !SERVER_ONLY_EVENTS.has(eventName);
+}
+
+function sanitizeArgs(args) {
+    return args.map((arg) => stripTargetId(arg));
+}
+
+function normalizeTargetId(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+    return getStringValue(value.targetId);
+}
+
+function getTargetId(args) {
+    for (const arg of args) {
+        const targetId = normalizeTargetId(arg);
+        if (targetId) return targetId;
+    }
+    return '';
+}
+
+function logForward(eventName, role, targetId) {
+    const targetText = targetId ? ` target=${targetId}` : '';
+    console.log(`[forward] role=${role} event=${eventName}${targetText}`);
+}
+
+function routeEvent(io, socket, role, eventName, args) {
+    if (!isForwardableEvent(eventName)) return;
+
+    const targetId = getTargetId(args);
+    const routedArgs = sanitizeArgs(args);
+    logForward(eventName, role, targetId);
+
+    if (targetId) {
+        io.to(targetId).emit(eventName, ...routedArgs);
+        return;
+    }
+
+    if (role === 'host') {
+        socket.broadcast.emit(eventName, ...routedArgs);
+        return;
+    }
+
+    io.to('hosts').emit(eventName, ...routedArgs);
+}
+
+function getParticipantPayloads(io, room) {
+    return Array.from(io.sockets.adapter.rooms.get(room) || [])
+        .map((socketId) => io.sockets.sockets.get(socketId)?.data?.identity)
+        .filter(Boolean);
+}
+
+function buildCoreRuntimeSnapshot(io) {
+    return {
+        mode: 'core-runtime',
+        hosts: getParticipantPayloads(io, 'hosts'),
+        viewers: getParticipantPayloads(io, 'viewers')
+    };
+}
+
+function listCompatibilityStudents(io) {
+    return getParticipantPayloads(io, 'viewers').map((participant) => participant.clientIp);
+}
+
+function buildLogEntry(type, participant) {
+    return {
+        time: new Date().toISOString(),
+        type,
+        ip: participant.clientIp,
+        clientId: participant.clientId,
+        clientKey: participant.clientKey,
+        role: participant.role,
+        socketId: participant.socketId
+    };
+}
+
+function getTransportState(io) {
+    if (!io.__lumesyncTransportState) {
+        io.__lumesyncTransportState = { compatibilityLog: [] };
+    }
+    return io.__lumesyncTransportState;
+}
+
+function pushCompatibilityLog(io, type, participant) {
+    const state = getTransportState(io);
+    state.compatibilityLog.push(buildLogEntry(type, participant));
+    if (state.compatibilityLog.length > STUDENT_LOG_MAX) {
+        state.compatibilityLog.shift();
+    }
+}
+
+function listCompatibilityLog(io) {
+    return getTransportState(io).compatibilityLog.slice();
+}
+
+function emitParticipantJoined(io, socket, participant) {
+    if (participant.role === 'host') {
+        socket.to('hosts').emit('participant-joined', participant);
+        socket.to('viewers').emit('participant-joined', participant);
+        return;
+    }
+    io.to('hosts').emit('participant-joined', participant);
+}
+
+function emitParticipantLeft(io, socket, participant) {
+    if (participant.role === 'host') {
+        socket.to('hosts').emit('participant-left', participant);
+        socket.to('viewers').emit('participant-left', participant);
+        return;
+    }
+    io.to('hosts').emit('participant-left', participant);
+}
+
+function setupSocketHandlers(io) {
+    getTransportState(io);
+
     io.on('connection', (socket) => {
-        // 统一转换为 IPv4，去掉 IPv6 映射前缀 ::ffff:
         const identity = resolveConnectionIdentity(socket);
         if (!identity.ok) {
             rejectIdentity(socket, identity.code, identity.message);
             return;
         }
-        const { role, clientIp, clientId, clientKey, isLegacy } = identity;
-        console.log(`[conn] IP=${clientIp} role=${role} clientId=${clientId} legacy=${isLegacy}`);
 
-        // 发送角色信息和当前课程状态给当前客户端
-        socket.emit('role-assigned', {
-            role: role,
-            clientIp: clientIp,
-            clientId,
-            clientKey,
-            legacyMode: !!isLegacy,
-            currentCourseId: getCurrentCourseId(),
-            currentSlideIndex: getCurrentSlideIndex(),
-            hostSettings: currentHostSettings,
-            courseCatalog: getCourseCatalog()
+        const participant = buildParticipantPayload(identity, socket);
+        const room = identity.role === 'host' ? 'hosts' : 'viewers';
+
+        socket.join(room);
+        socket.data.identity = participant;
+
+        console.log(`[conn] IP=${identity.clientIp} role=${identity.role} clientId=${identity.clientId} legacy=${identity.isLegacy}`);
+        pushCompatibilityLog(io, 'join', participant);
+        socket.emit('role-assigned', participant);
+        emitParticipantJoined(io, socket, participant);
+
+        socket.onAny((eventName, ...args) => {
+            routeEvent(io, socket, identity.role, eventName, args);
         });
-
-        // 加入房间
-        if (role === 'host') {
-            socket.join('hosts');
-            // 教师端连接时发送初始学生数量
-            socket.emit('student-status', { count: studentConnections.size, action: 'init' });
-        } else {
-            socket.join('viewers');
-            // 统计在线学生
-            const prevConn = studentConnections.get(clientKey)?.count || 0;
-            studentConnections.set(clientKey, {
-                count: prevConn + 1,
-                clientId,
-                clientIp
-            });
-            const prevIp = studentIPs.get(clientIp) || 0;
-            studentIPs.set(clientIp, prevIp + 1);
-            // 只有该 IP 的第一个连接才触发 join 通知
-            if (prevConn === 0) {
-                pushLog('join', clientIp, { clientId, clientKey });
-                io.to('hosts').emit('student-status', {
-                    count: studentConnections.size,
-                    action: 'join',
-                    ip: clientIp,
-                    clientId,
-                    clientKey
-                });
-            }
-        }
-
-        // 获取学生数量（教师端主动查询）
-        socket.on('get-student-count', () => {
-            if (role !== 'host') return;
-            socket.emit('student-status', { count: studentConnections.size, action: 'init' });
-        });
-
-        // ========================================================
-        // 教师端事件处理
-        // ========================================================
-
-        // 选择课程
-        socket.on('select-course', (data) => {
-            if (role !== 'host') return;
-            const { courseId } = data;
-            console.log(`[select-course] courseId=${courseId}`);
-            setCurrentCourseId(courseId);
-            setCurrentSlideIndex(0);
-            io.emit('course-changed', { courseId, slideIndex: 0, hostSettings: currentHostSettings });
-        });
-
-        // 切换幻灯片
-        socket.on('sync-slide', (data) => {
-            if (role !== 'host') return;
-            const { slideIndex } = data;
-            console.log(`[sync-slide] slideIndex=${slideIndex}`);
-            setCurrentSlideIndex(slideIndex);
-            // 发送给所有学生端（学生端监听 sync-slide）
-            io.to('viewers').emit('sync-slide', { slideIndex });
-        });
-
-        // 同步设置（前端发送的事件名是 host-settings）
-        socket.on('update-settings', (data) => {
-            if (role !== 'host') return;
-            currentHostSettings = { ...currentHostSettings, ...data };
-            // 通知所有学生更新设置
-            io.to('viewers').emit('host-settings', currentHostSettings);
-        });
-
-        socket.on('host-settings', (data) => {
-            if (role !== 'host') return;
-            const prevSyncFollow = currentHostSettings.syncFollow;
-            currentHostSettings = { ...currentHostSettings, ...data };
-            // 通知所有学生更新设置，同时广播给其他教师端
-            io.emit('host-settings', currentHostSettings);
-            // 如果开启了学生跟随翻页，立即同步当前页面
-            if (!prevSyncFollow && currentHostSettings.syncFollow) {
-                const currentSlide = getCurrentSlideIndex();
-                if (currentSlide !== undefined && currentSlide !== null) {
-                    io.to('viewers').emit('sync-slide', { slideIndex: currentSlide });
-                }
-            }
-        });
-
-        // 刷新课程列表
-        socket.on('refresh-courses', () => {
-            if (role !== 'host') return;
-            if (typeof refreshCourseCatalog !== 'function') return;
-            const catalog = refreshCourseCatalog();
-            // 广播课程目录更新给所有教师端
-            io.to('hosts').emit('course-catalog-updated', { courses: catalog });
-        });
-
-        // 结束课程（返回课程选择界面）
-        socket.on('end-course', () => {
-            if (role !== 'host') return;
-            const courseId = getCurrentCourseId();
-            setCurrentCourseId(null);
-            setCurrentSlideIndex(0);
-            annotationStore.clear();
-            clearVotesByCourse(courseId);
-            console.log(`[end-course] courseId=${courseId}`);
-            io.emit('course-ended');
-        });
-
-        // 注册课件依赖映射
-        socket.on('register-dependencies', (deps) => {
-            if (!Array.isArray(deps)) return;
-            if (typeof registerDependencies === 'function') {
-                registerDependencies(deps);
-            }
-        });
-
-        // 学生端上报异常行为
-        socket.on('student-alert', (data) => {
-            if (role !== 'viewer') return;
-            const { type } = data;
-            pushLog(type, clientIp, { clientId, clientKey });
-            io.to('hosts').emit('student-alert', { ip: clientIp, type, clientId, clientKey });
-        });
-
-        // 教师端推送管理员密码
-        socket.on('set-admin-password', (data) => {
-            if (role !== 'host' || !data?.hash) return;
-            console.log('[set-admin-password] password update pushed to students');
-            io.to('viewers').emit('set-admin-password', { hash: data.hash });
-        });
-
-        // 学生端请求同步状态
-        socket.on('request-sync-state', (data) => {
-            if (role !== 'viewer') return;
-            const { courseId, slideIndex } = data;
-            console.log(`[request-sync-state] courseId=${courseId} slideIndex=${slideIndex} ip=${clientIp}`);
-            io.to('hosts').emit('request-sync-state', { courseId, slideIndex, requesterId: socket.id });
-        });
-
-        // 教师端发送完整同步数据
-        socket.on('full-sync-state', (data) => {
-            if (role !== 'host') return;
-            const { targetId, courseId, slideIndex, state } = data;
-            if (targetId) {
-                io.to(targetId).emit('full-sync-state', { courseId, slideIndex, state });
-            } else {
-                io.to('viewers').emit('full-sync-state', { courseId, slideIndex, state });
-            }
-        });
-
-        // 学生提交作业 - 转发给教师端处理
-        socket.on('student:submit', (data) => {
-            if (role !== 'viewer') return;
-
-            const submissionId = data && data.submissionId ? String(data.submissionId) : '';
-            const courseId = data && data.courseId ? String(data.courseId) : getCurrentCourseId() || '';
-            const content = data && data.content !== undefined ? data.content : null;
-            const fileName = data && data.fileName ? String(data.fileName) : '';
-            const mergeFile = data && typeof data.mergeFile === 'boolean' ? data.mergeFile : false;
-
-            if (!submissionId || !courseId) {
-                socket.emit('student:submit:result', {
-                    submissionId,
-                    success: false,
-                    error: 'Invalid parameters'
-                });
-                return;
-            }
-
-            // 转发到教师端处理存储
-            io.to('hosts').emit('student:submit', {
-                submissionId,
-                courseId,
-                clientIp,
-                clientId,
-                content,
-                fileName,
-                mergeFile,
-                timestamp: Date.now()
-            });
-
-            console.log(`[student:submit] Forwarding to host: IP=${clientIp} courseId=${courseId} submissionId=${submissionId}`);
-        });
-
-        // 教师端确认已收到提交 - 转发给学生端
-        socket.on('student:submit:ack', (data) => {
-            if (role !== 'host') return;
-
-            const submissionId = data && data.submissionId ? String(data.submissionId) : '';
-            const success = data && typeof data.success === 'boolean' ? data.success : true;
-            const error = data && data.error ? String(data.error) : '';
-
-            // 转发确认给学生端
-            io.emit('student:submit:result', {
-                submissionId,
-                success,
-                error
-            });
-
-            console.log(`[student:submit:ack] Forwarding to student: submissionId=${submissionId} success=${success}`);
-        });
-
-        // 同步交互（CourseGlobalContext.syncInteraction）
-        socket.on('interaction:sync', (data) => {
-            if (role !== 'host' || !currentHostSettings.syncInteraction) return;
-            // 补充 courseId 和 slideIndex 信息
-            const courseId = getCurrentCourseId();
-            const slideIndex = getCurrentSlideIndex();
-            io.to('viewers').emit('interaction:sync', {
-                ...data,
-                courseId,
-                slideIndex
-            });
-        });
-
-        // 同步变量（useSyncVar）
-        socket.on('sync-var', (data) => {
-            console.log(`[sync-var] data=${JSON.stringify(data)} syncInteraction=${currentHostSettings.syncInteraction} role=${role}`);
-            if (role !== 'host' || !currentHostSettings.syncInteraction) return;
-            // 转发给所有学生端
-            io.to('viewers').emit('sync-var', data);
-        });
-
-        // ========================================================
-        // 投票组件（VoteSlide）
-        // ========================================================
-
-        socket.on('vote:start', (data) => {
-            if (role !== 'host') return;
-            const voteId = String(data?.voteId || '').trim();
-            const question = String(data?.question || '').trim();
-            const options = Array.isArray(data?.options) ? data.options : [];
-            const durationSec = Math.max(10, Math.min(300, Number(data?.durationSec || 60)));
-            const anonymous = !!data?.anonymous;
-            const courseId = getCurrentCourseId();
-            const slideIndex = getCurrentSlideIndex();
-
-            if (!courseId || !voteId || !question || options.length < 2) return;
-
-            const normalizedOptions = options
-                .filter(opt => opt && String(opt.id || '').trim() && String(opt.label || '').trim())
-                .map(opt => ({ id: String(opt.id).trim(), label: String(opt.label).trim() }));
-
-            if (normalizedOptions.length < 2) return;
-
-            const key = getVoteKey(courseId, slideIndex, voteId);
-            clearVoteSession(courseId, slideIndex, voteId);
-
-            const now = Date.now();
-            const session = {
-                voteId,
-                question,
-                options: normalizedOptions,
-                anonymous,
-                courseId,
-                slideIndex,
-                startedAt: now,
-                endsAt: now + durationSec * 1000,
-                status: 'running',
-                responses: new Map()
-            };
-
-            voteSessions.set(key, session);
-
-            const timer = setTimeout(() => {
-                const active = voteSessions.get(key);
-                if (!active || active.status !== 'running') return;
-                active.status = 'ended';
-                const result = buildVoteResult(active);
-                io.emit('vote:end', result);
-                clearVoteSession(active.courseId, active.slideIndex, active.voteId);
-            }, durationSec * 1000);
-
-            voteSessionTimers.set(key, timer);
-
-            io.emit('vote:start', {
-                voteId,
-                question,
-                options: normalizedOptions,
-                anonymous,
-                courseId,
-                slideIndex,
-                durationSec,
-                startedAt: session.startedAt,
-                endsAt: session.endsAt
-            });
-
-            io.to('hosts').emit('vote:result', buildVoteResult(session));
-        });
-
-        socket.on('vote:submit', (data) => {
-            if (role !== 'viewer') return;
-
-            const voteId = String(data?.voteId || '').trim();
-            const courseId = String(data?.courseId || '').trim();
-            const slideIndex = Number(data?.slideIndex || 0);
-            const optionId = String(data?.optionId || '').trim();
-            const key = getVoteKey(courseId, slideIndex, voteId);
-            const session = voteSessions.get(key);
-
-            if (!session || session.status !== 'running' || Date.now() > session.endsAt) {
-                socket.emit('vote:submit:ack', { success: false, voteId, error: '投票已结束' });
-                return;
-            }
-
-            if (!session.options.some(opt => opt.id === optionId)) {
-                socket.emit('vote:submit:ack', { success: false, voteId, error: '无效选项' });
-                return;
-            }
-
-            if (session.responses.has(clientKey)) {
-                socket.emit('vote:submit:ack', { success: false, voteId, error: '你已提交过投票' });
-                return;
-            }
-
-            session.responses.set(clientKey, optionId);
-            const result = buildVoteResult(session);
-
-            socket.emit('vote:submit:ack', { success: true, voteId });
-            io.to('hosts').emit('vote:result', result);
-            if (!session.anonymous) {
-                io.to('viewers').emit('vote:result', result);
-            }
-        });
-
-        socket.on('vote:end', (data) => {
-            if (role !== 'host') return;
-
-            const voteId = String(data?.voteId || '').trim();
-            if (!voteId) return;
-
-            const requestedCourseId = String(data?.courseId || getCurrentCourseId() || '').trim();
-            const requestedSlideIndex = Number.isFinite(Number(data?.slideIndex))
-                ? Number(data.slideIndex)
-                : Number(getCurrentSlideIndex() || 0);
-
-            let key = getVoteKey(requestedCourseId, requestedSlideIndex, voteId);
-            let session = voteSessions.get(key);
-
-            if (!session) {
-                const found = findVoteSessionByCourseAndVoteId(requestedCourseId, voteId);
-                if (found) {
-                    key = found.key;
-                    session = found.session;
-                }
-            }
-
-            if (!session) return;
-
-            session.status = 'ended';
-            const result = buildVoteResult(session);
-            io.emit('vote:end', result);
-            clearVoteSession(session.courseId, session.slideIndex, session.voteId);
-        });
-
-        // ========================================================
-        // 标注同步
-        // ========================================================
-
-
-        // 添加标注段（旧版本，兼容）
-        socket.on('annotation-add', (data) => {
-            const { courseId, slideIndex, segment } = data;
-            const key = getAnnoKey(courseId, slideIndex);
-            const segments = annotationStore.get(key) || [];
-
-            // 限制每张幻灯片最多 N 段
-            if (segments.length >= ANNOTATION_MAX_SEGMENTS_PER_SLIDE) {
-                segments.shift();
-            }
-            segments.push(segment);
-            annotationStore.set(key, segments);
-
-            // 广播给所有客户端
-            io.emit('annotation-add', { courseId, slideIndex, segment });
-        });
-
-        // 绘制线段（实时）
-        socket.on('annotation:segment', (data) => {
-            if (role !== 'host') return;
-            // 转发给所有学生端
-            io.to('viewers').emit('annotation:segment', data);
-        });
-
-        // 完成一笔
-        socket.on('annotation:stroke', (data) => {
-            if (role !== 'host') return;
-            // 存储到服务器
-            const { courseId, slideIndex, tool, color, width, alpha, points } = data;
-            const key = getAnnoKey(courseId, slideIndex);
-            const segments = annotationStore.get(key) || [];
-
-            // 限制每张幻灯片最多 N 段
-            if (segments.length >= ANNOTATION_MAX_SEGMENTS_PER_SLIDE) {
-                segments.shift();
-            }
-            segments.push({ tool, color, width, alpha, points });
-            annotationStore.set(key, segments);
-
-            // 广播给所有学生端
-            io.to('viewers').emit('annotation:stroke', data);
-        });
-
-        // 清除标注
-        socket.on('annotation:clear', (data) => {
-            if (role !== 'host') return;
-            const { courseId, slideIndex } = data;
-            const key = getAnnoKey(courseId, slideIndex);
-            annotationStore.delete(key);
-            io.to('viewers').emit('annotation:clear', { courseId, slideIndex });
-        });
-
-        // 获取标注（学生端请求）
-        socket.on('annotation:get', (data) => {
-            const { courseId, slideIndex } = data;
-            const key = getAnnoKey(courseId, slideIndex);
-            const segments = annotationStore.get(key) || [];
-            socket.emit('annotation:state', { courseId, slideIndex, segments });
-        });
-
-        // 加载标注（旧版本，兼容）
-        socket.on('annotation-load', (data) => {
-            const { courseId, slideIndex } = data;
-            const key = getAnnoKey(courseId, slideIndex);
-            const segments = annotationStore.get(key) || [];
-            socket.emit('annotation-loaded', { courseId, slideIndex, segments });
-        });
-
-        // ========================================================
-        // 学生端事件处理
-        // ========================================================
-
-        // 学生操作日志
-        socket.on('student-action', (data) => {
-            if (role !== 'viewer') return;
-            const { type, slide } = data;
-            pushLog(type, clientIp, { slide, clientId, clientKey });
-        });
-
-        // ========================================================
-        // 断开连接处理
-        // ========================================================
 
         socket.on('disconnect', () => {
-            console.log(`[disconnect] IP=${clientIp} role=${role} clientId=${clientId}`);
-
-            if (role === 'viewer') {
-                const connCount = studentConnections.get(clientKey)?.count || 0;
-                if (connCount <= 1) {
-                    studentConnections.delete(clientKey);
-                    pushLog('leave', clientIp, { clientId, clientKey });
-                    io.to('hosts').emit('student-status', {
-                        count: studentConnections.size,
-                        action: 'leave',
-                        ip: clientIp,
-                        clientId,
-                        clientKey
-                    });
-                } else {
-                    studentConnections.set(clientKey, {
-                        count: connCount - 1,
-                        clientId,
-                        clientIp
-                    });
-                }
-
-                const ipCount = studentIPs.get(clientIp) || 0;
-                if (ipCount <= 1) {
-                    studentIPs.delete(clientIp);
-                } else {
-                    studentIPs.set(clientIp, ipCount - 1);
-                }
-            }
+            console.log(`[disconnect] IP=${identity.clientIp} role=${identity.role} clientId=${identity.clientId}`);
+            pushCompatibilityLog(io, 'leave', participant);
+            emitParticipantLeft(io, socket, participant);
         });
     });
 
     return io;
 }
 
-// 导出学生IP统计和日志，供API使用
-function getStudentCount() {
-    return studentConnections.size;
-}
-
-function getStudentLog() {
-    return studentLog;
-}
-
-function getStudentIPs() {
-    return studentIPs;
-}
-
 module.exports = {
     setupSocketHandlers,
-    getStudentCount,
-    getStudentLog,
-    getStudentIPs,
-    currentHostSettings
+    buildCoreRuntimeSnapshot,
+    listCompatibilityStudents,
+    listCompatibilityLog
 };

@@ -50,7 +50,7 @@ function WindowControls({ forceFullscreen = false }) {
     };
 
     return (
-        <div className="flex items-center" style={{ WebkitAppRegion: 'no-drag' }}>
+        <div className="flex items-center" style={{ WebkitAppRegion: 'no-drag' }} data-window-control="true">
             <button
                 onClick={handleMinimize}
                 className="w-11 h-8 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"

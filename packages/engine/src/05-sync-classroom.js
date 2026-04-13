@@ -1,4 +1,4 @@
-// ========================================================
+﻿// ========================================================
 // Error Boundary: 捕获课件运行时错误，防止整个课堂崩溃
 // ========================================================
 class CourseErrorBoundary extends React.Component {
@@ -76,10 +76,13 @@ class CourseErrorBoundary extends React.Component {
 // ========================================================
 // 课堂主界面组件（教师端 + 学生端共用）
 // ========================================================
-function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: initialIsHost, initialSlide, settings, onSettingsChange, studentCount, studentLog, studentInfo, hideTopBar = false, hideBottomBar = false }) {
+function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: initialIsHost, initialSlide, currentSlide: controlledSlide, onSlideChange, settings, onSettingsChange, studentCount, studentLog, studentInfo, hideTopBar = false, hideBottomBar = false, renderChrome = true, renderTeacherOverlays = true }) {
     const [currentSlide, setCurrentSlide] = useState(initialSlide || 0);
     const [isHost, setIsHost] = useState(initialIsHost || false);
     const [roleAssigned, setRoleAssigned] = useState(true);
+    const showChrome = renderChrome !== false;
+    const showTeacherChrome = showChrome && renderTeacherOverlays !== false;
+    const useFullscreenStage = showChrome && (!hideTopBar || !hideBottomBar);
     const [toasts, setToasts] = useState([]);
     const [showLog, setShowLog] = useState(false);
     const [showClassroomView, setShowClassroomView] = useState(false);
@@ -149,6 +152,13 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
     const socketRef = useRef(socket);
     const settingsRef = useRef(settings);
     useEffect(() => { settingsRef.current = settings; }, [settings]);
+
+    useEffect(() => {
+        if (typeof controlledSlide !== 'number' || !Number.isFinite(controlledSlide)) return;
+        const maxSlide = Math.max((slides?.length || 1) - 1, 0);
+        const nextSlide = Math.min(Math.max(Math.floor(controlledSlide), 0), maxSlide);
+        setCurrentSlide(prev => prev === nextSlide ? prev : nextSlide);
+    }, [controlledSlide, slides?.length]);
 
 
 
@@ -644,6 +654,7 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
             }
             if (window._onCamActive) window._onCamActive(false);
             setCurrentSlide(data.slideIndex);
+            if (typeof onSlideChange === 'function') onSlideChange(data.slideIndex, { source: 'sync' });
         });
         socket.on('interaction:sync', (data) => {
             // 学生端接收并应用教师端的交互状态
@@ -774,6 +785,7 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
             }
             if (window._onCamActive) window._onCamActive(false);
             setCurrentSlide(index);
+            if (typeof onSlideChange === 'function') onSlideChange(index, { source: 'local' });
             if (isHost && socketRef.current) {
                 socketRef.current.emit('sync-slide', { slideIndex: index });
             }
@@ -1534,10 +1546,10 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
     }
 
     return (
-        <div className="flex flex-col h-[100dvh] bg-slate-900 text-slate-800 font-sans select-none relative">
+        <div className={`flex flex-col ${useFullscreenStage ? 'h-[100dvh]' : 'h-full'} bg-slate-900 text-slate-800 font-sans select-none relative`}>
 
             {/* 顶栏 */}
-            {!hideTopBar && (
+            {showChrome && !hideTopBar && (
             <div className="flex items-center justify-between px-6 md:px-8 py-4 bg-white shadow-md z-20 relative h-[72px] shrink-0" style={{WebkitAppRegion:'drag'}}>
                 <div className="flex items-center space-x-3 flex-1 min-w-0">
                     <i className="fas fa-microchip text-blue-600 text-2xl md:text-3xl"></i>
@@ -1729,7 +1741,7 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
 
                     </div>
 
-                    {isHost && window.__LumeSyncUI?.SideToolbar && (
+                    {showTeacherChrome && isHost && window.__LumeSyncUI?.SideToolbar && (
                         <>
                             <window.__LumeSyncUI.SideToolbar
                                 visible={true}
@@ -1774,12 +1786,12 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
             </div>
 
             {/* 底栏导航 */}
-            {!hideBottomBar && (
+            {showChrome && !hideBottomBar && (
             <div className="flex items-center justify-between px-6 md:px-10 py-4 bg-white border-t border-slate-200 shadow-[0_-4px_15px_-3px_rgba(0,0,0,0.1)] z-20 relative h-[72px] shrink-0">
                 {isHost ? (
                     <>
                         <button onClick={prevSlide} disabled={currentSlide === 0} className={`flex items-center px-4 md:px-6 py-2 md:py-2.5 rounded-xl font-bold text-base md:text-lg transition-all ${currentSlide === 0 ? 'text-slate-400 bg-slate-100 cursor-not-allowed' : 'text-white bg-blue-500 hover:bg-blue-600 shadow-md hover:-translate-x-1'}`}>
-                            <i className="fas fa-chevron-left mr-2"></i>上一页
+                            <i className="fas fa-chevron-left mr-2"></i>{'\u4e0a\u4e00\u9875'}
                         </button>
                         <div className="flex items-center gap-3 relative">
 
@@ -1815,20 +1827,20 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
 
                         </div>
                         <button onClick={nextSlide} disabled={currentSlide === slides.length - 1} className={`flex items-center px-4 md:px-6 py-2 md:py-2.5 rounded-xl font-bold text-base md:text-lg transition-all ${currentSlide === slides.length - 1 ? 'text-slate-400 bg-slate-100 cursor-not-allowed' : 'text-white bg-blue-500 hover:bg-blue-600 shadow-md hover:translate-x-1'}`}>
-                            下一页<i className="fas fa-chevron-right ml-2"></i>
+                            {'\u4e0b\u4e00\u9875'}<i className="fas fa-chevron-right ml-2"></i>
                         </button>
                     </>
                 ) : (
                     !settings.syncFollow ? (
                         <>
                             <button onClick={prevSlide} disabled={currentSlide === 0} className={`flex items-center px-4 md:px-6 py-2 md:py-2.5 rounded-xl font-bold text-base md:text-lg transition-all ${currentSlide === 0 ? 'text-slate-400 bg-slate-100 cursor-not-allowed' : 'text-white bg-green-500 hover:bg-green-600 shadow-md hover:-translate-x-1'}`}>
-                                <i className="fas fa-chevron-left mr-2"></i>上一页
+                                <i className="fas fa-chevron-left mr-2"></i>{'\u4e0a\u4e00\u9875'}
                             </button>
                             <span className="text-slate-500 font-bold text-base md:text-lg tracking-widest bg-slate-100 px-4 md:px-6 py-1 md:py-2 rounded-full shadow-inner border border-slate-200">
                                 {currentSlide + 1} / {slides.length}
                             </span>
                             <button onClick={nextSlide} disabled={currentSlide === slides.length - 1} className={`flex items-center px-4 md:px-6 py-2 md:py-2.5 rounded-xl font-bold text-base md:text-lg transition-all ${currentSlide === slides.length - 1 ? 'text-slate-400 bg-slate-100 cursor-not-allowed' : 'text-white bg-green-500 hover:bg-green-600 shadow-md hover:translate-x-1'}`}>
-                                下一页<i className="fas fa-chevron-right ml-2"></i>
+                                {'\u4e0b\u4e00\u9875'}<i className="fas fa-chevron-right ml-2"></i>
                             </button>
                         </>
                     ) : (
@@ -1838,7 +1850,7 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
                                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
                                     <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
                                 </span>
-                                正在观看老师演示 | 进度：{currentSlide + 1} / {slides.length}
+                                {'\u6b63\u5728\u89c2\u770b\u8001\u5e08\u6f14\u793a | \u8fdb\u5ea6\uff1a'}{currentSlide + 1} / {slides.length}
                             </div>
                         </div>
                     )
@@ -1847,7 +1859,7 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
             )}
 
             {/* 日志面板 */}
-            {isHost && showLog && (
+            {showChrome && isHost && showLog && (
                 <div className="fixed inset-0 z-[9997] flex justify-end" onClick={() => setShowLog(false)}>
                     <div className="w-96 h-full bg-white shadow-2xl border-l border-slate-200 flex flex-col" onClick={e => e.stopPropagation()}>
                         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 shrink-0">
@@ -1886,11 +1898,11 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
                 </div>
             )}
 
-            {isHost && showSettings && (
+            {showChrome && isHost && showSettings && (
                 <SettingsPanel settings={settings} onSettingsChange={onSettingsChange} socket={socketRef.current} onClose={() => setShowSettings(false)} zIndex="z-[9998]" />
             )}
 
-            {isHost && showClassroomView && (
+            {showChrome && isHost && showClassroomView && (
                 <ClassroomView
                     onClose={() => setShowClassroomView(false)}
                     socket={socketRef.current}
@@ -1900,16 +1912,16 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
                 />
             )}
 
-            <div className="fixed top-24 right-6 z-50 flex flex-col space-y-3 pointer-events-none">
+            {showChrome && <div className="fixed top-24 right-6 z-50 flex flex-col space-y-3 pointer-events-none">
                 {toasts.map(t => (
                     <div key={t.id} className={`px-4 py-3 rounded-xl shadow-xl border backdrop-blur-md font-bold text-sm md:text-base flex items-center toast-animate ${t.type === 'success' ? 'bg-green-500/90 border-green-400 text-white' : 'bg-orange-500/90 border-orange-400 text-white'}`}>
                         {t.message}
                     </div>
                 ))}
-            </div>
+            </div>}
 
             {/* 文件预览弹窗 */}
-            <FilePreviewModal />
+            {showChrome && <FilePreviewModal />}
 
             <style>{`
                 @keyframes slideInRight { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
