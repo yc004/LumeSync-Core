@@ -1614,6 +1614,7 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
             <div className="flex-1 relative flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-hidden">
                 <div ref={stageWrapRef} className="relative w-full h-full flex items-center justify-center overflow-hidden">
                     <div
+                        data-lumesync-stage-root="true"
                         className="bg-white text-slate-800 relative shadow-2xl flex flex-col rounded-2xl overflow-hidden shrink-0"
                         style={{
                             width: '1280px',
