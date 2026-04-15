@@ -85,7 +85,6 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
     const useFullscreenStage = showChrome && (!hideTopBar || !hideBottomBar);
     const [toasts, setToasts] = useState([]);
     const [showLog, setShowLog] = useState(false);
-    const [showClassroomView, setShowClassroomView] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [annotateEnabled, setAnnotateEnabled] = useState(false);
     const [voteToolbarState, setVoteToolbarState] = useState({
@@ -110,6 +109,8 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
 
     const liquidGlassDarkClass = window.__LumeSyncUI?.styles?.liquidGlassDark || 'bg-slate-900/70 backdrop-blur-xl border border-white/15 shadow-[0_10px_30px_rgba(15,23,42,0.45)]';
     const liquidGlassLightClass = window.__LumeSyncUI?.styles?.liquidGlassLight || 'bg-white/75 backdrop-blur-xl border border-white/70 shadow-[0_10px_30px_rgba(15,23,42,0.2)]';
+    const HostWindowControls = window.__LumeSyncHostChrome?.WindowControls || window.WindowControls;
+    const HostSettingsRenderer = window.__LumeSyncHostChrome?.SettingsPanel || window.SettingsPanel;
 
     const [annoTool, setAnnoTool] = useState('pen'); // pen | marker | highlighter | eraser
     const [annoWidth, setAnnoWidth] = useState(4);
@@ -313,16 +314,6 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
             }, [key, onChange]);
 
             return [localVal, setValue];
-        };
-        
-        // 保留旧的 API 以防代码不兼容，但旧的不会触发重新渲染
-        window.CourseGlobalContext.registerSyncVar = (key, initialValue, options = {}) => {
-            const [val, setVal] = window.CourseGlobalContext.useSyncVar(key, initialValue, options);
-            return { get: () => val, set: setVal };
-        };
-        window.CourseGlobalContext.registerVar = (key, initialValue, options = {}) => {
-            const [val, setVal] = window.CourseGlobalContext.useLocalVar(key, initialValue, options);
-            return { get: () => val, set: setVal };
         };
 
         // 获取学生信息（学生端专用）
@@ -1558,22 +1549,8 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
                     <h1 className="flex-1 min-w-0 text-lg md:text-2xl font-bold text-slate-800 tracking-wide truncate">{title}</h1>
                     <div className="hidden sm:flex items-center ml-4 space-x-2 shrink-0">
                         <span className={`px-3 py-1 text-xs md:text-sm font-bold rounded-full border ${isHost ? 'bg-blue-50 text-blue-600 border-blue-200' : 'bg-green-50 text-green-600 border-green-200'}`}>
-                            {isHost ? '🧑‍🏫 老师端 (主控)' : '👨‍🎓 学生端 (观看)'}
+                            {isHost ? '????? 老师端 (主控)' : '????? 学生端 (观看)'}
                         </span>
-                        {isHost && (
-                            <button
-                                onClick={() => setShowClassroomView(true)}
-                                className="px-3 py-1 text-xs md:text-sm font-bold rounded-full border bg-purple-50 text-purple-600 border-purple-200 flex items-center shadow-inner hover:bg-purple-100 transition-colors"
-                                title="点击查看机房视图"
-                                style={{WebkitAppRegion:'no-drag'}}
-                            >
-                                <span className="relative flex h-2 w-2 mr-2">
-                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75"></span>
-                                    <span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500"></span>
-                                </span>
-                                在线学生: {studentCount}
-                            </button>
-                        )}
                     </div>
                 </div>
                 <div className="flex items-center space-x-3 md:space-x-4" style={{WebkitAppRegion:'no-drag'}}>
@@ -1602,11 +1579,11 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
                             <div key={idx} className={`h-2.5 rounded-full transition-all duration-300 ${idx === currentSlide ? 'w-8 md:w-10 bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.6)]' : 'w-2 md:w-3 bg-slate-200'}`} />
                         ))}
                     </div>
-                    {!isHost && (
-                        <WindowControls forceFullscreen={settings.forceFullscreen} />
+                    {!isHost && HostWindowControls && (
+                        <HostWindowControls forceFullscreen={settings.forceFullscreen} />
                     )}
-                    {isHost && (
-                        <WindowControls />
+                    {isHost && HostWindowControls && (
+                        <HostWindowControls />
                     )}
                 </div>
             </div>
@@ -1901,21 +1878,11 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
                 </div>
             )}
 
-            {showChrome && isHost && showSettings && (
-                <SettingsPanel settings={settings} onSettingsChange={onSettingsChange} socket={socketRef.current} onClose={() => setShowSettings(false)} zIndex="z-[9998]" />
+            {showChrome && isHost && showSettings && HostSettingsRenderer && (
+                <HostSettingsRenderer settings={settings} onSettingsChange={onSettingsChange} socket={socketRef.current} onClose={() => setShowSettings(false)} zIndex="z-[9998]" />
             )}
 
-            {showChrome && isHost && showClassroomView && (
-                <ClassroomView
-                    onClose={() => setShowClassroomView(false)}
-                    socket={socketRef.current}
-                    studentLog={studentLog}
-                    podiumAtTop={settings && settings.podiumAtTop}
-                    onPodiumAtTopChange={(v) => onSettingsChange && onSettingsChange('podiumAtTop', !!v)}
-                />
-            )}
-
-            {showChrome && <div className="fixed top-24 right-6 z-50 flex flex-col space-y-3 pointer-events-none">
+{showChrome && <div className="fixed top-24 right-6 z-50 flex flex-col space-y-3 pointer-events-none">
                 {toasts.map(t => (
                     <div key={t.id} className={`px-4 py-3 rounded-xl shadow-xl border backdrop-blur-md font-bold text-sm md:text-base flex items-center toast-animate ${t.type === 'success' ? 'bg-green-500/90 border-green-400 text-white' : 'bg-orange-500/90 border-orange-400 text-white'}`}>
                         {t.message}
