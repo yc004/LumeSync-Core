@@ -257,7 +257,70 @@ Node.js SDK 层。
 - `resource-loader.tsx`：脚本资源加载与 fallback。
 - `camera-manager.tsx`：课件摄像头能力。
 - `sync-classroom.tsx`：课件舞台、翻页同步、标注、投票工具栏、提交相关运行能力。
-- `app.tsx`：课件加载、PDF 课件支持、`LumeSyncRenderEngine` 暴露。
+- `app.tsx`：课件加载、PDF 课件支持、Zip `.lume` 课件装载、`LumeSyncRenderEngine` 暴露。
+
+## 课件加载模型
+
+Core 浏览器运行时的最终运行数据结构仍然是 `CourseData`。无论课件来源是 PDF、旧版脚本课件，还是新版 Zip `.lume`，最终都会被转换成：
+
+```ts
+type CourseData = {
+  id?: string;
+  title?: string;
+  icon?: string;
+  desc?: string;
+  color?: string;
+  slides: Array<{
+    id?: string;
+    title?: string;
+    component: React.ReactNode;
+    scrollable?: boolean;
+  }>;
+};
+```
+
+这样 `sync-classroom.tsx`、翻页同步、标注、投票、提交等运行时能力不需要感知课件物理格式。
+
+### Zip `.lume`
+
+新版 `.lume` 是标准 Zip 包，入口固定为 `manifest.json`：
+
+```text
+/
+├── manifest.json
+├── assets/
+└── slides/
+```
+
+浏览器运行时会按以下流程加载：
+
+1. `fetch(course.file)` 获取 `.lume` 二进制。
+2. 通过 JSZip 解包。
+3. 读取 `manifest.json` 并按 `pages` 顺序加载页面。
+4. 将 `assets/*` 转为 `URL.createObjectURL(blob)`。
+5. 编译并执行 `slides/*.tsx`。
+6. 将页面组件组装为标准 `CourseData.slides`。
+
+`manifest.pages` 是播放顺序的唯一来源，运行时不会按文件名重新排序。
+
+支持的 `manifest.runtime.entryMode`：
+
+- `pages`：主路径，一页一个 `slides/*.tsx` 文件。
+- `legacy-course-data`：迁移兼容路径，执行包装后的旧源码并读取 `window.CourseData`。
+
+资源路径处理：
+
+- 支持 `<img src="assets/logo.png" />`。
+- 支持 `<video src="assets/demo.mp4" />`。
+- 支持 `<source src="assets/audio.mp3" />`。
+- 找不到资源时保留原路径并输出 warning。
+
+宿主需要提供：
+
+- `window.Babel`，用于浏览器内 TSX 编译。
+- `JSZip`，或可从 `/lib/jszip.min.js` 加载。
+
+Core 只负责浏览器内课件装载和渲染，不负责 `.lume` 文件扫描、课程目录管理、迁移脚本、打包上传或本地文件存储。这些属于教师端宿主。
 
 ### `src/browser/engine/course-components`
 
@@ -526,6 +589,18 @@ getTeacherRenderEngineSources({ preferSource: true })
 
 这可以避免教师端硬编码 Core 内部文件名。
 
+教师端自身仍然负责以下宿主能力：
+
+- 扫描课程目录并区分 PDF、Zip `.lume`、旧版脚本 `.lume`。
+- 从 Zip `manifest.json` 提取课程列表元数据。
+- 提供 `/courses/*`、`/lib/jszip.min.js` 等静态资源入口。
+- 提供 Babel Standalone、React、ReactDOM 等浏览器运行时依赖。
+- 使用迁移脚本把旧版单文件 `.lume` 包装成新版 Zip `.lume`。
+- 由 native shell 启动和关闭本地 Node 服务。
+- 由 native shell 管理系统托盘、主窗口生命周期、PID 文件和残留 `node.exe` 清理。
+
+Core 与 teacher 的边界是：Core 暴露可复用运行时和课件渲染能力；teacher 决定课程来自哪里、如何列出、如何保存、如何启动本地服务。
+
 ## 开发
 
 安装依赖：
@@ -669,6 +744,8 @@ Core 的长期约束：
 - 不依赖教师端私有目录。
 - 不包含教师端产品页面。
 - 不包含 native shell 和安装器逻辑。
+- 不管理本地 Node 服务进程、托盘图标、PID 文件或安装器级生命周期。
+- 不扫描教师端课程目录，也不负责课程文件持久化。
 - 所有公共能力必须通过 package exports 暴露。
 - 浏览器运行时文件名按职责命名，不使用 `00-name` 这种顺序编号命名。
 - 课件通用组件统一放在 `src/browser/engine/course-components`。
@@ -682,6 +759,14 @@ Core 的长期约束：
 ### Core 里为什么没有机房视图？
 
 机房视图是教师端产品 UI，属于 teacher shell。Core 只提供课堂运行时和通用课件能力。
+
+### Core 负责关闭教师端 Node 服务吗？
+
+不负责。Core 可以提供独立 Runtime Server，也可以被教师端服务端复用 Socket、身份和渲染运行时能力；但教师端本地 `node.exe` 的启动、关闭、PID 文件、托盘和窗口生命周期都属于 `LumeSync-Teacher` 的 native shell。
+
+### Zip `.lume` 是 Core 还是 Teacher 的能力？
+
+两边各负责一部分。Core 的浏览器运行时负责把 Zip `.lume` 解包、编译 `slides/*.tsx`、映射 `assets/*`，并转换成 `CourseData`。Teacher 负责扫描课程目录、读取清单元数据、提供静态文件入口、迁移旧课件和保存课件文件。
 
 ### 课件通用组件在哪里？
 
