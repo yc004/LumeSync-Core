@@ -1900,3 +1900,6 @@ function SyncClassroom({ courseId, title, slides, onEndCourse, socket, isHost: i
         </div>
     );
 }
+
+window.CourseErrorBoundary = CourseErrorBoundary;
+window.SyncClassroom = SyncClassroom;

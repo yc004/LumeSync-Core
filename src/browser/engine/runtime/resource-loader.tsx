@@ -67,3 +67,6 @@ const checkModelUrlValidity = async (urls) => {
     console.warn('[ResourceLoader] LAN model unreachable, using CDN: ' + urls.public);
     return urls.public;
 };
+
+window.loadScriptWithFallback = loadScriptWithFallback;
+window.checkModelUrlValidity = checkModelUrlValidity;

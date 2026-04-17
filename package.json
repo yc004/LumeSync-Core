@@ -35,6 +35,11 @@
       "import": "./dist/esm/node/render-engine.js",
       "require": "./dist/cjs/node/render-engine.js"
     },
+    "./browser-runtime": {
+      "types": "./dist/types/browser-runtime/index.d.ts",
+      "import": "./dist/esm/browser-runtime/index.js",
+      "require": "./dist/cjs/browser-runtime/index.js"
+    },
     "./server": {
       "types": "./dist/types/server/index.d.ts",
       "import": "./dist/esm/server/index.js",

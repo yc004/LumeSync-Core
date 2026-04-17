@@ -4,6 +4,12 @@
 // Host applications own teacher/student chrome and app flow.
 // ========================================================
 
+const loadScriptWithFallback = window.loadScriptWithFallback;
+const checkModelUrlValidity = window.checkModelUrlValidity;
+const CourseErrorBoundary = window.CourseErrorBoundary;
+const SyncClassroom = window.SyncClassroom;
+const WebPageSlide = window.WebPageSlide;
+
 const ensurePdfJsLoaded = async () => {
     if (window.pdfjsLib && typeof window.pdfjsLib.getDocument === 'function') return true;
     const ok = await loadScriptWithFallback(
@@ -181,6 +187,64 @@ const validateLumeManifest = (manifest) => {
         if (!page?.file) throw new Error(`manifest.pages[${idx}].file is required`);
     });
     return entryMode;
+};
+
+const buildCourseDataFromMemory = async ({ manifest, slides: memorySlides = [], course = {} } = {}) => {
+    disposeLoadedLume();
+
+    const normalizedManifest = {
+        ...manifest,
+        runtime: {
+            format: 'lumesync-zip',
+            entryMode: 'pages',
+            ...(manifest?.runtime || {})
+        }
+    };
+
+    validateLumeManifest(normalizedManifest);
+
+    const memorySlideMap = new Map(
+        (Array.isArray(memorySlides) ? memorySlides : []).map((slide) => [
+            normalizeLumePath(slide?.file),
+            String(slide?.source || '')
+        ])
+    );
+
+    const assetUrl = (assetPath) => assetPath;
+    const compiledSlides = [];
+
+    for (const page of normalizedManifest.pages) {
+        const slidePath = normalizeLumePath(page.file);
+        const source = memorySlideMap.get(slidePath);
+        if (typeof source !== 'string' || !source.trim()) {
+            throw new Error(`Slide source not found in memory: ${page.file}`);
+        }
+
+        const moduleExports = compileLumeModule(source, slidePath, assetUrl, 'module');
+        const slideExport = resolveSlideExport(moduleExports, page);
+        compiledSlides.push({
+            id: page.id || slidePath,
+            title: page.title || page.id || slidePath,
+            transition: page.transition,
+            scrollable: page.scrollable === true,
+            component: slideExportToElement(slideExport, page)
+        });
+    }
+
+    const courseId = normalizedManifest.id || course.id || 'memory-course';
+    window.CourseGlobalContext = createExportCourseContext({ courseId, slideIndex: 0 });
+
+    const courseData = {
+        id: courseId,
+        title: normalizedManifest.title || course.title || courseId,
+        icon: normalizedManifest.icon || course.icon || 'Course',
+        desc: normalizedManifest.desc || normalizedManifest.description || course.desc || '',
+        color: normalizedManifest.color || course.color || 'from-blue-500 to-indigo-600',
+        slides: compiledSlides
+    };
+
+    window.CourseData = courseData;
+    return courseData;
 };
 
 const loadLumeZipCourse = async (course, options = {}) => {
@@ -514,12 +578,14 @@ function CourseStage(props) {
 
 function CourseExportDocument({ course, courseData, contentScale = 1 }) {
     const slides = Array.isArray(courseData?.slides) ? courseData.slides : [];
-    const normalizedContentScale = Math.min(Math.max(Number(contentScale) || 1, 0.5), 1.5);
+    const normalizedContentScale = Math.min(Math.max(Number(contentScale) || 1, 0.2), 1.5);
+    const slideWidth = 1280;
+    const slideHeight = 720;
     const exportContentStyle = {
-        width: `${100 / normalizedContentScale}%`,
-        height: `${100 / normalizedContentScale}%`,
+        width: `${slideWidth}px`,
+        height: `${slideHeight}px`,
         transform: `scale(${normalizedContentScale})`,
-        transformOrigin: 'center center',
+        transformOrigin: 'top left',
     };
 
     return (
@@ -545,7 +611,7 @@ function CourseExportDocument({ course, courseData, contentScale = 1 }) {
                         className="flex w-full overflow-hidden rounded-[32px] border border-slate-300 bg-white shadow-[0_32px_120px_rgba(15,23,42,0.18)] print:rounded-none print:border-0 print:shadow-none"
                         style={{ aspectRatio: '16 / 9' }}
                     >
-                        <div className="flex h-full w-full items-center justify-center overflow-hidden bg-white">
+                        <div className="relative h-full w-full overflow-hidden bg-white">
                             <div style={exportContentStyle}>
                                 {slide?.component || (
                                     <div className="flex h-full items-center justify-center text-slate-400">
@@ -577,6 +643,7 @@ const renderCourseExportDocument = (rootElement, props) => {
 
 window.LumeSyncRenderEngine = {
     ...(window.LumeSyncRenderEngine || {}),
+    buildCourseDataFromMemory,
     CourseErrorBoundary,
     CourseExportDocument,
     CourseStage,
