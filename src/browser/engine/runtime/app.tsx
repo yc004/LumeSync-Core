@@ -4,15 +4,15 @@
 // Host applications own teacher/student chrome and app flow.
 // ========================================================
 
-const loadScriptWithFallback = window.loadScriptWithFallback;
-const checkModelUrlValidity = window.checkModelUrlValidity;
-const CourseErrorBoundary = window.CourseErrorBoundary;
-const SyncClassroom = window.SyncClassroom;
-const WebPageSlide = window.WebPageSlide;
+const engineLoadScriptWithFallback = window.loadScriptWithFallback;
+const engineCheckModelUrlValidity = window.checkModelUrlValidity;
+const EngineCourseErrorBoundary = window.CourseErrorBoundary;
+const EngineSyncClassroom = window.SyncClassroom;
+const EngineWebPageSlide = window.WebPageSlide;
 
 const ensurePdfJsLoaded = async () => {
     if (window.pdfjsLib && typeof window.pdfjsLib.getDocument === 'function') return true;
-    const ok = await loadScriptWithFallback(
+    const ok = await engineLoadScriptWithFallback(
         '/lib/pdf.min.js',
         'https://fastly.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js'
     );
@@ -25,7 +25,7 @@ const ensurePdfJsLoaded = async () => {
 
 const ensureJsZipLoaded = async () => {
     if (window.JSZip && typeof window.JSZip.loadAsync === 'function') return true;
-    const ok = await loadScriptWithFallback(
+    const ok = await engineLoadScriptWithFallback(
         '/lib/jszip.min.js',
         'https://fastly.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'
     );
@@ -281,16 +281,26 @@ const loadLumeZipCourse = async (course, options = {}) => {
         const source = await legacyFile.async('string');
         compileLumeModule(source, legacyPage.file, assetUrl, 'script');
         if (!window.CourseData) throw new Error('Legacy CourseData was not registered by ' + legacyPage.file);
-        window.CourseGlobalContext = createContext({ socket });
-        setProgress(onProgress, { currentStep: 'done', currentFile: '', progress: 100, totalSteps: 5, currentStepIndex: 5 });
-        return {
+        const legacyCourseData = {
             ...window.CourseData,
             id: window.CourseData.id || manifest.id || course.id,
             title: window.CourseData.title || manifest.title || course.title || course.id,
             icon: window.CourseData.icon || manifest.icon || course.icon,
             desc: window.CourseData.desc || manifest.desc || course.desc,
-            color: window.CourseData.color || manifest.color || course.color
+            color: window.CourseData.color || manifest.color || course.color,
+            dependencies: window.CourseData.dependencies || manifest.dependencies || [],
+            modelsUrls: window.CourseData.modelsUrls || manifest.modelsUrls
         };
+        window.CourseData = legacyCourseData;
+        return loadCourseDataDependencies(legacyCourseData, {
+            socket,
+            onProgress,
+            createContext,
+            baseSteps: 5,
+            firstDependencyStepIndex: 6,
+            dependencyProgressStart: 65,
+            dependencyProgressSpan: 25,
+        });
     }
 
     const slides = [];
@@ -317,11 +327,20 @@ const loadLumeZipCourse = async (course, options = {}) => {
         icon: manifest.icon || course.icon || 'Course',
         desc: manifest.desc || manifest.description || course.desc || '',
         color: manifest.color || course.color || 'from-blue-500 to-indigo-600',
+        dependencies: manifest.dependencies || [],
+        modelsUrls: manifest.modelsUrls,
         slides
     };
     window.CourseData = courseData;
-    setProgress(onProgress, { currentStep: 'done', currentFile: '', progress: 100, totalSteps: 5, currentStepIndex: 5 });
-    return courseData;
+    return loadCourseDataDependencies(courseData, {
+        socket,
+        onProgress,
+        createContext,
+        baseSteps: 5,
+        firstDependencyStepIndex: 6,
+        dependencyProgressStart: 65,
+        dependencyProgressSpan: 25,
+    });
 };
 
 const getPdfDoc = (pdfUrl) => {
@@ -454,6 +473,58 @@ const createExportCourseContext = ({ courseId = '', slideIndex = 0 } = {}) => ({
     submitContent: async () => ({ success: false, error: 'Export preview mode does not accept submissions' }),
 });
 
+const loadCourseDataDependencies = async (courseData, {
+    socket,
+    onProgress,
+    createContext = createCourseContext,
+    baseSteps = 3,
+    firstDependencyStepIndex = 4,
+    dependencyProgressStart = 30,
+    dependencyProgressSpan = 40,
+} = {}) => {
+    const dependencies = Array.isArray(courseData?.dependencies) ? courseData.dependencies : [];
+    let totalSteps = baseSteps;
+    if (dependencies.length) totalSteps += dependencies.length;
+    if (courseData?.modelsUrls) totalSteps += 1;
+
+    if (dependencies.length) {
+        const depMappings = dependencies
+            .filter(d => d.localSrc && d.publicSrc)
+            .map(d => ({ filename: d.localSrc.split('/').pop(), publicSrc: d.publicSrc }));
+        if (depMappings.length > 0 && socket) socket.emit('register-dependencies', depMappings);
+
+        let depIndex = 0;
+        for (const dep of dependencies) {
+            const fileName = dep.localSrc.split('/').pop();
+            setProgress(onProgress, {
+                currentStep: 'load-dependency',
+                currentFile: fileName,
+                progress: dependencyProgressStart + (depIndex / Math.max(dependencies.length, 1)) * dependencyProgressSpan,
+                totalSteps,
+                currentStepIndex: firstDependencyStepIndex + depIndex
+            });
+            await engineLoadScriptWithFallback(dep.localSrc, dep.publicSrc);
+            depIndex++;
+        }
+    }
+
+    let modelUrl = '';
+    if (courseData?.modelsUrls) {
+        setProgress(onProgress, {
+            currentStep: 'check-models',
+            currentFile: 'models',
+            progress: Math.min(95, dependencyProgressStart + dependencyProgressSpan + 5),
+            totalSteps,
+            currentStepIndex: firstDependencyStepIndex + dependencies.length
+        });
+        modelUrl = await engineCheckModelUrlValidity(courseData.modelsUrls);
+    }
+
+    window.CourseGlobalContext = createContext({ socket, modelUrl });
+    setProgress(onProgress, { currentStep: 'done', currentFile: '', progress: 100, totalSteps, currentStepIndex: totalSteps });
+    return courseData;
+};
+
 const loadCourse = async (course, options = {}) => {
     const { socket, onProgress, createContext = createCourseContext } = options;
     if (!course || !course.file) throw new Error('Missing course file');
@@ -520,41 +591,7 @@ const loadCourse = async (course, options = {}) => {
     }
     if (!window.CourseData) throw new Error('CourseData was not registered by ' + course.file);
 
-    let totalSteps = 3;
-    const dependencies = Array.isArray(window.CourseData.dependencies) ? window.CourseData.dependencies : [];
-    if (dependencies.length) totalSteps += dependencies.length;
-    if (window.CourseData.modelsUrls) totalSteps += 1;
-
-    if (dependencies.length) {
-        const depMappings = dependencies
-            .filter(d => d.localSrc && d.publicSrc)
-            .map(d => ({ filename: d.localSrc.split('/').pop(), publicSrc: d.publicSrc }));
-        if (depMappings.length > 0 && socket) socket.emit('register-dependencies', depMappings);
-
-        let depIndex = 0;
-        for (const dep of dependencies) {
-            const fileName = dep.localSrc.split('/').pop();
-            setProgress(onProgress, {
-                currentStep: 'load-dependency',
-                currentFile: fileName,
-                progress: 30 + (depIndex / Math.max(dependencies.length, 1)) * 40,
-                totalSteps,
-                currentStepIndex: 4 + depIndex
-            });
-            await loadScriptWithFallback(dep.localSrc, dep.publicSrc);
-            depIndex++;
-        }
-    }
-
-    let modelUrl = '';
-    if (window.CourseData.modelsUrls) {
-        setProgress(onProgress, { currentStep: 'check-models', currentFile: 'models', progress: 75, totalSteps, currentStepIndex: 4 + dependencies.length });
-        modelUrl = await checkModelUrlValidity(window.CourseData.modelsUrls);
-    }
-
-    window.CourseGlobalContext = createContext({ socket, modelUrl });
-    setProgress(onProgress, { currentStep: 'done', currentFile: '', progress: 100, totalSteps, currentStepIndex: totalSteps });
-    return window.CourseData;
+    return loadCourseDataDependencies(window.CourseData, { socket, onProgress, createContext });
 };
 
 function CourseStage(props) {
@@ -566,7 +603,7 @@ function CourseStage(props) {
         ...stageProps
     } = props;
     return (
-        <SyncClassroom
+        <EngineSyncClassroom
             {...stageProps}
             renderChrome={renderChrome}
             renderTeacherOverlays={renderTeacherOverlays}
@@ -644,11 +681,11 @@ const renderCourseExportDocument = (rootElement, props) => {
 window.LumeSyncRenderEngine = {
     ...(window.LumeSyncRenderEngine || {}),
     buildCourseDataFromMemory,
-    CourseErrorBoundary,
+    CourseErrorBoundary: EngineCourseErrorBoundary,
     CourseExportDocument,
     CourseStage,
     PdfPageSlide,
-    WebPageSlide,
+    WebPageSlide: EngineWebPageSlide,
     createCourseContext,
     createExportCourseContext,
     getPdfDoc,

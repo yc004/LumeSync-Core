@@ -11,3 +11,4 @@ export const server = runtime.server;
 export const io = runtime.io;
 export const startServer = runtime.startServer;
 export { createCoreServer };
+export * from './script-cache.js';

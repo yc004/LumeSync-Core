@@ -315,6 +315,22 @@ type CourseData = {
 - 支持 `<source src="assets/audio.mp3" />`。
 - 找不到资源时保留原路径并输出 warning。
 
+外部脚本依赖需要在 `manifest.json` 中声明：
+
+```json
+{
+  "dependencies": [
+    {
+      "name": "chartjs",
+      "localSrc": "/lib/chart.umd.min.js",
+      "publicSrc": "https://fastly.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
+    }
+  ]
+}
+```
+
+教师端选中课件时会调用 Core 的脚本缓存能力，先检查 `localSrc` 对应的本地缓存文件；如果不存在，则从 `publicSrc` 拉取并写入本地 `/lib` 缓存目录。浏览器运行时仍会按声明加载 `/lib/...`，这样首屏播放不会再依赖临时注册。
+
 宿主需要提供：
 
 - `window.Babel`，用于浏览器内 TSX 编译。
