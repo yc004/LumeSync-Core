@@ -283,14 +283,27 @@ type CourseData = {
 
 ### Zip `.lume`
 
-新版 `.lume` 是标准 Zip 包，入口固定为 `manifest.json`：
+新版 `.lume` 是标准 Zip 包，入口固定为包根目录下的 `manifest.json`。Core 只读取 Zip 内部路径，所有路径都使用 `/` 分隔，不使用 Windows 反斜杠。
 
 ```text
 /
 ├── manifest.json
-├── assets/
-└── slides/
+├── slides/
+│   ├── Intro.tsx
+│   ├── Activity.tsx
+│   └── Summary.tsx
+└── assets/
+    ├── cover.png
+    ├── demo.mp4
+    └── data.json
 ```
+
+推荐约定：
+
+- `manifest.json`：课件清单，声明元数据、运行时、页面顺序、资源、外部依赖。
+- `slides/*.tsx`：页面源码。每个页面文件默认导出一个 React 组件，或通过 `exportName` 指定命名导出。
+- `assets/*`：图片、音视频、字体、数据文件等课件内置资源。
+- 课件页面顺序只由 `manifest.pages` 决定，文件名不会自动排序。
 
 浏览器运行时会按以下流程加载：
 
@@ -301,12 +314,158 @@ type CourseData = {
 5. 编译并执行 `slides/*.tsx`。
 6. 将页面组件组装为标准 `CourseData.slides`。
 
-`manifest.pages` 是播放顺序的唯一来源，运行时不会按文件名重新排序。
+#### 标准 `manifest.json`
 
-支持的 `manifest.runtime.entryMode`：
+下面是推荐的标准配置。字段可以按需裁剪，但 `runtime.format`、`runtime.entryMode`、`pages` 是新版 Zip 课件的核心字段。
 
-- `pages`：主路径，一页一个 `slides/*.tsx` 文件。
+```json
+{
+  "schemaVersion": "1.0.0",
+  "id": "ai-literacy-demo",
+  "title": "人工智能通识课",
+  "version": "1.0.0",
+  "author": {
+    "name": "LumeSync",
+    "email": "course@example.com"
+  },
+  "createdAt": "2026-04-18T00:00:00.000Z",
+  "updatedAt": "2026-04-18T00:00:00.000Z",
+  "icon": "AI",
+  "desc": "面向课堂演示的人工智能互动课件",
+  "color": "from-emerald-500 to-cyan-600",
+  "runtime": {
+    "format": "lumesync-zip",
+    "react": "18",
+    "slideModule": "tsx",
+    "entryMode": "pages",
+    "preferredAspectRatio": "16:9"
+  },
+  "dependencies": [
+    {
+      "name": "chartjs",
+      "localSrc": "/lib/chart.umd.min.js",
+      "publicSrc": "https://fastly.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
+    }
+  ],
+  "modelsUrls": {
+    "local": "/weights",
+    "public": "https://fastly.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights"
+  },
+  "pages": [
+    {
+      "id": "intro",
+      "file": "slides/Intro.tsx",
+      "title": "课程导入",
+      "scrollable": false,
+      "transition": {
+        "type": "fade",
+        "duration": 260,
+        "easing": "ease-out"
+      }
+    },
+    {
+      "id": "activity",
+      "file": "slides/Activity.tsx",
+      "title": "互动探究",
+      "exportName": "ActivitySlide",
+      "scrollable": true,
+      "transition": {
+        "type": "slide",
+        "direction": "left",
+        "duration": 320,
+        "easing": "ease-in-out"
+      }
+    }
+  ],
+  "assets": {
+    "assets/cover.png": {
+      "type": "image/png",
+      "size": 245760,
+      "usage": ["intro"]
+    },
+    "assets/demo.mp4": {
+      "type": "video/mp4",
+      "usage": ["activity"]
+    }
+  }
+}
+```
+
+#### 顶层配置项
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `schemaVersion` | string | 推荐 | 课件清单版本。当前推荐 `1.0.0`。 |
+| `id` | string | 推荐 | 课件稳定 ID。教师端扫描时可使用该值作为课程 ID；缺省时宿主可用文件路径生成 ID。 |
+| `title` | string | 推荐 | 课件标题。 |
+| `version` | string | 可选 | 课件内容版本。 |
+| `author` | object/string | 可选 | 作者信息。对象形式推荐包含 `name`、`email`。 |
+| `createdAt` | string | 可选 | ISO 时间字符串。 |
+| `updatedAt` | string | 可选 | ISO 时间字符串。 |
+| `icon` | string | 可选 | 教师端课程卡片图标文本。 |
+| `desc` / `description` | string | 可选 | 课件简介。`desc` 优先用于转换到 `CourseData.desc`。 |
+| `color` | string | 可选 | 教师端课程卡片色彩标记，由宿主 UI 解释。 |
+| `runtime` | object | 必填 | 运行时配置。见下表。 |
+| `pages` | array | 必填 | 页面列表和播放顺序。至少包含 1 个页面。 |
+| `assets` | object | 可选 | 内置资源清单。Core 会同时扫描 Zip 中实际存在的 `assets/*`。 |
+| `dependencies` | array/object | 可选 | 外部脚本依赖声明。教师端可据此预缓存脚本，浏览器运行时按顺序加载。 |
+| `modelsUrls` | object | 可选 | 模型资源地址配置，常用于 face-api 等模型文件。 |
+
+#### `runtime` 配置项
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `format` | string | 必填 | 必须为 `lumesync-zip`。不是该值时 Core 会拒绝作为新版 Zip 课件加载。 |
+| `entryMode` | string | 必填 | `pages` 或 `legacy-course-data`。 |
+| `slideModule` | string | 推荐 | 当前推荐 `tsx`，表示页面源码按 React + TypeScript 编译。 |
+| `react` | string | 可选 | 课件声明的 React 目标版本。当前宿主提供 React 18。 |
+| `preferredAspectRatio` | string | 可选 | 推荐画布比例，例如 `16:9`。当前主要由宿主舞台布局解释。 |
+
+支持的 `runtime.entryMode`：
+
+- `pages`：主路径，一页一个 `slides/*.tsx` 文件。每个文件导出 React 组件，Core 将其组装到 `CourseData.slides`。
 - `legacy-course-data`：迁移兼容路径，执行包装后的旧源码并读取 `window.CourseData`。
+
+#### `pages[]` 配置项
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 推荐 | 页面稳定 ID。缺省时使用 `file`。 |
+| `file` | string | 必填 | Zip 内页面源码路径，例如 `slides/Intro.tsx`。 |
+| `title` | string | 可选 | 页面标题，可用于目录、导出或调试。 |
+| `exportName` | string | 可选 | 页面文件使用命名导出时指定导出名。未设置时按 `default`，再按文件名推断。 |
+| `scrollable` | boolean | 可选 | 是否允许页面内容滚动。默认 `false`。 |
+| `transition` | object | 可选 | 页面切换动效元数据。当前由宿主或后续运行时解释。 |
+
+页面模块示例：
+
+```tsx
+export default function IntroSlide() {
+  return (
+    <section className="flex h-full items-center justify-center bg-white text-slate-900">
+      <h1 className="text-5xl font-bold">人工智能通识课</h1>
+    </section>
+  );
+}
+```
+
+命名导出示例：
+
+```tsx
+export function ActivitySlide() {
+  return <div className="h-full bg-white p-8">互动探究</div>;
+}
+```
+
+对应 `manifest.pages[]`：
+
+```json
+{
+  "id": "activity",
+  "file": "slides/Activity.tsx",
+  "exportName": "ActivitySlide"
+}
+```
 
 资源路径处理：
 
@@ -314,6 +473,15 @@ type CourseData = {
 - 支持 `<video src="assets/demo.mp4" />`。
 - 支持 `<source src="assets/audio.mp3" />`。
 - 找不到资源时保留原路径并输出 warning。
+- 资源路径会在编译前被改写为 Object URL，只对 JSX 属性中的 `src`、`href`、`poster` 生效。
+
+`assets` 清单用于描述资源，不强制要求完整列出所有资源。Core 会把清单中的路径和 Zip 内实际存在的 `assets/*` 合并处理。推荐字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `type` | string | MIME 类型，例如 `image/png`、`video/mp4`、`application/json`。 |
+| `size` | number | 文件大小，单位字节。可用于打包校验或宿主展示。 |
+| `usage` | string[] | 使用该资源的页面 ID 列表。 |
 
 外部脚本依赖需要在 `manifest.json` 中声明：
 
@@ -329,7 +497,34 @@ type CourseData = {
 }
 ```
 
-教师端选中课件时会调用 Core 的脚本缓存能力，先检查 `localSrc` 对应的本地缓存文件；如果不存在，则从 `publicSrc` 拉取并写入本地 `/lib` 缓存目录。浏览器运行时仍会按声明加载 `/lib/...`，这样首屏播放不会再依赖临时注册。
+`dependencies` 支持数组形式，推荐每项包含：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `name` | string | 可选 | 依赖名称，仅用于可读性。 |
+| `localSrc` | string | 必填 | 本地加载地址。脚本缓存目前推荐 `/lib/<filename>.js`。 |
+| `publicSrc` | string | 必填 | 远程下载地址。首次缓存或本地缺失时使用。 |
+
+教师端选中课件时会调用 Core 的脚本缓存能力，先检查 `localSrc` 对应的本地缓存文件；如果不存在，则从 `publicSrc` 拉取并写入本地 `/lib` 缓存目录。浏览器运行时仍会按声明顺序加载 `/lib/...`，这样首屏播放不会再依赖临时注册。
+
+注意事项：
+
+- `dependencies` 只负责外部脚本，不负责课件内 `assets/*`。
+- 依赖脚本加载后应暴露全局变量，例如 `window.Chart`、`window.katex`、`window._`。
+- 页面组件首次渲染时应容忍依赖仍在初始化中的情况，复杂依赖建议在组件内检查全局对象。
+
+`modelsUrls` 用于模型文件目录探测：
+
+```json
+{
+  "modelsUrls": {
+    "local": "/weights",
+    "public": "https://fastly.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights"
+  }
+}
+```
+
+运行时会优先检查 `local`，不可用时回退到 `public`。
 
 宿主需要提供：
 
